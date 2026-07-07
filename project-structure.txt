@@ -1,0 +1,2 @@
+# Debt Optimizer Blueprint
+This folder contains the technical design documentation.

@@ -1,0 +1,151 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Loan {
+  id                 String    @id @default(cuid())
+  lender             String    @default("")
+  name               String
+  type               String    @default("PERSONAL") // PERSONAL | GOLD | CREDIT_CARD
+  priority           Int       @default(0)
+  loanAmount         Float     @default(0)
+  disbursedAmount    Float     @default(0)
+  outstandingAmount  Float
+  annualInterestRate Float
+  apr                Float     @default(0)
+  reducingBalance    Boolean   @default(true)
+  emi                Float
+  emiDay             Int       @default(1)
+  tenureMonths       Int       @default(0)
+  remainingMonths    Int       @default(0)
+  startDate          DateTime
+  endDate            DateTime
+  processingFee      Float     @default(0)
+  totalInterest      Float     @default(0)
+  totalRepayment     Float     @default(0)
+  foreclosureJson    String    @default("{\"allowed\":true,\"lockInMonths\":0,\"feePct\":0}")
+  partPaymentJson    String    @default("{\"allowed\":true,\"lockInMonths\":0,\"feePct\":0,\"minAmount\":0}")
+  createdAt          DateTime  @default(now())
+  payments           Payment[]
+
+  @@map("loans")
+}
+
+model Payment {
+  id     String @id @default(cuid())
+  loanId String
+  loan   Loan   @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  month  String
+  amount Float
+  kind   String // emi | extra | bonus
+
+  @@map("payments")
+}
+
+model Scenario {
+  id                  String   @id @default(cuid())
+  name                String
+  strategy            String
+  extraMonthlyPayment Float    @default(0)
+  bonusMonth          Int?
+  bonusAmount         Float?
+  opportunityRatePct  Float    @default(6)
+  createdAt           DateTime @default(now())
+
+  @@map("scenarios")
+}
+
+model Snapshot {
+  id        String   @id @default(cuid())
+  takenAt   DateTime @default(now())
+  totalDebt Float
+  dataJson  String
+
+  @@map("snapshots")
+}
+
+model Category {
+  id            String         @id @default(cuid())
+  name          String
+  kind          String // INCOME | EXPENSE
+  preset        Boolean        @default(false)
+  budgetMonthly Float? // monthly target for expense categories
+  entries       Entry[]
+  subscriptions Subscription[]
+
+  @@unique([name, kind])
+  @@map("categories")
+}
+
+model Subscription {
+  id           String    @id @default(cuid())
+  name         String // "Netflix"
+  amount       Float
+  categoryId   String
+  category     Category  @relation(fields: [categoryId], references: [id])
+  method       String    @default("UPI")
+  cadence      String    @default("MONTHLY") // MONTHLY | YEARLY
+  billingDay   Int       @default(1) // day of month, clamped to month length
+  billingMonth Int? // 1-12, YEARLY only
+  startDate    DateTime
+  endDate      DateTime? // set when cancelled
+  active       Boolean   @default(true)
+  note         String    @default("")
+  entries      Entry[]
+  createdAt    DateTime  @default(now())
+
+  @@map("subscriptions")
+}
+
+model Entry {
+  id          String       @id @default(cuid())
+  date        DateTime
+  kind        String // INCOME | EXPENSE
+  amount      Float
+  categoryId  String
+  category    Category     @relation(fields: [categoryId], references: [id])
+  method      String       @default("CASH") // CASH | BANK | UPI | CREDIT_CARD | OTHER
+  note        String       @default("")
+  tagsJson    String       @default("[]")
+  source         String        @default("MANUAL") // MANUAL | EMI_AUTO | SUB_AUTO
+  loanId         String?
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  periodKey      String? // YYYY-MM, set on auto rows; one per loan/subscription per period
+  attachments    Attachment[]
+  createdAt      DateTime      @default(now())
+
+  @@unique([loanId, periodKey])
+  @@unique([subscriptionId, periodKey])
+  @@index([date])
+  @@map("entries")
+}
+
+model Attachment {
+  id        String   @id @default(cuid())
+  entryId   String
+  entry     Entry    @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  filename  String
+  mimeType  String
+  size      Int
+  data      Bytes
+  createdAt DateTime @default(now())
+
+  @@map("attachments")
+}
+
+model SimulationResult {
+  id             String   @id @default(cuid())
+  strategy       String
+  inputJson      String
+  resultJson     String
+  comparisonJson String
+  createdAt      DateTime @default(now())
+
+  @@map("simulation_results")
+}

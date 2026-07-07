@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+apps/api/prisma/dev.db
+apps/api/prisma/dev.db-journal
