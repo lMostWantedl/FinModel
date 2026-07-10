@@ -1,9 +1,11 @@
 import { loanFromJson, loanToJson, toMoney, type Loan as DomainLoan, type LoanJson } from '@debt/engine';
 import type { Loan as LoanRow } from '@prisma/client';
 import type { z } from 'zod';
-import type { loanJsonSchema } from '../schemas.js';
+import type { loanJsonSchema as sc } from '../schemas.js';
+import { loanJsonSchema } from '../schemas.js';
+import { prisma } from '../lib/prisma.js';
 
-type ParsedLoan = z.infer<typeof loanJsonSchema>;
+type ParsedLoan = z.infer<typeof sc>;
 
 /** Validate/derive via the engine's domain model, then flatten for Prisma. */
 export function parsedToDbData(parsed: ParsedLoan) {
@@ -37,9 +39,16 @@ export function parsedToDbData(parsed: ParsedLoan) {
   };
 }
 
+function getMonthDifference(start: Date, end: Date): number {
+  return (
+    (end.getFullYear() - start.getFullYear()) * 12 +
+    (end.getMonth() - start.getMonth())
+  );
+}
+
 /** Rehydrate the domain Loan from its DB row. */
-export function rowToDomain(row: LoanRow): DomainLoan {
-  return loanFromJson({
+export async function rowToDomain(row: LoanRow): Promise<DomainLoan> {
+  const body = {
     id: row.id,
     lender: row.lender,
     name: row.name,
@@ -54,7 +63,7 @@ export function rowToDomain(row: LoanRow): DomainLoan {
     emi: row.emi,
     emiDay: row.emiDay,
     tenureMonths: row.tenureMonths,
-    remainingMonths: row.remainingMonths,
+    remainingMonths: getMonthDifference(row.startDate, new Date()) || row.remainingMonths,
     startDate: row.startDate.toISOString(),
     endDate: row.endDate.toISOString(),
     processingFee: row.processingFee,
@@ -62,7 +71,17 @@ export function rowToDomain(row: LoanRow): DomainLoan {
     totalRepayment: row.totalRepayment,
     foreclosure: JSON.parse(row.foreclosureJson),
     partPayment: JSON.parse(row.partPaymentJson),
-  });
+  }
+  if (getMonthDifference(row.startDate, new Date()) !== row.remainingMonths) {
+    const { id } = row;
+    const parseBody = loanJsonSchema.parse(body);
+    const loan = await prisma.loan
+      .update({ where: { id }, data: parsedToDbData(parseBody) })
+      .catch(() => {
+        console.error(`Failed to update loan ${id} with recalculated remainingMonths`);
+      });
+  }
+  return loanFromJson(body);
 }
 
-export const rowToJson = (row: LoanRow): LoanJson => loanToJson(rowToDomain(row));
+export const rowToJson = async (row: LoanRow): Promise<LoanJson> => loanToJson(await rowToDomain(row));

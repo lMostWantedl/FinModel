@@ -6,13 +6,13 @@ import { parsedToDbData, rowToJson } from '../services/loanMapper.js';
 export const loanRoutes: FastifyPluginAsync = async (app) => {
   app.get('/loans', async () => {
     const rows = await prisma.loan.findMany({ orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }] });
-    return rows.map(rowToJson);
+    return Promise.all(rows.map((row) => rowToJson(row)));
   });
 
   app.post('/loans', async (req, reply) => {
     const body = loanJsonSchema.parse(req.body);
     const loan = await prisma.loan.create({ data: parsedToDbData(body) });
-    return reply.code(201).send(rowToJson(loan));
+    return reply.code(201).send(await rowToJson(loan));
   });
 
   /** Import one loan JSON object or an array of them. */
@@ -22,7 +22,7 @@ export const loanRoutes: FastifyPluginAsync = async (app) => {
     const created = await prisma.$transaction(
       parsed.map((p) => prisma.loan.create({ data: parsedToDbData(p) })),
     );
-    return reply.code(201).send({ imported: created.length, loans: created.map(rowToJson) });
+    return reply.code(201).send({ imported: created.length, loans: await Promise.all(created.map((loan) => rowToJson(loan))) });
   });
 
   /** Full update: body is the same shape as POST /loans; derived fields recompute. */
@@ -34,7 +34,7 @@ export const loanRoutes: FastifyPluginAsync = async (app) => {
       .catch(() => {
         throw Object.assign(new Error('Loan not found'), { statusCode: 404 });
       });
-    return rowToJson(loan);
+    return await rowToJson(loan);
   });
 
   app.delete('/loans/:id', async (req, reply) => {

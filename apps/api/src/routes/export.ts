@@ -8,7 +8,7 @@ import { buildDashboard, currentMonth } from '../services/simulationService.js';
 export const exportRoutes: FastifyPluginAsync = async (app) => {
   app.get('/export/excel', async (_req, reply) => {
     const rows = await prisma.loan.findMany({ orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }] });
-    const loans = rows.map(rowToJson);
+    const loans = await Promise.all(rows.map((row) => rowToJson(row)));
     const dash = await buildDashboard({
       extraMonthlyPayment: 0,
       bonuses: [],

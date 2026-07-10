@@ -26,7 +26,7 @@ export const currentMonth = (): string => new Date().toISOString().slice(0, 7);
 
 export async function loadLoans(asOf: Date = new Date()): Promise<LoanInput[]> {
   const rows = await prisma.loan.findMany({ orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }] });
-  return rows.map((r) => toSimulationLoan(rowToDomain(r), asOf));
+  return Promise.all(rows.map(async (r) => toSimulationLoan(await rowToDomain(r), asOf)));
 }
 
 export interface SimulationPayload {
