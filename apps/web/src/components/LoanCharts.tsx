@@ -19,13 +19,15 @@ import type { LoanAnalyticsItem, LoanAnalyticsResponse } from '../types';
 const compact = (v: number) =>
   Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
 
-interface LoanChartsProps {
+export interface LoanChartsProps {
   data: LoanAnalyticsResponse;
+  onRecalculate?: () => void;
+  recalculating?: boolean;
 }
 
 type SortField = 'outstanding' | 'paid' | 'toBePaid' | 'rate' | 'percent';
 
-export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
+export function LoanCharts({ data, onRecalculate, recalculating }: LoanChartsProps) {
   const t = useTheme();
   const [viewMode, setViewMode] = useState<'grouped' | 'stacked'>('grouped');
   const [sortBy, setSortBy] = useState<SortField>('outstanding');
@@ -220,6 +222,39 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
               <option value="percent">Sort: % Progress (High to Low)</option>
               <option value="rate">Sort: Interest Rate (Highest first)</option>
             </select>
+
+            {onRecalculate && (
+              <button
+                className="ghost"
+                disabled={recalculating}
+                onClick={onRecalculate}
+                style={{
+                  border: '1px solid var(--border)',
+                  padding: '4px 10px',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  background: 'var(--surface-1)',
+                  color: 'var(--accent)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  cursor: recalculating ? 'wait' : 'pointer',
+                }}
+                title="Redo all calculations by reconciling verified statement payments with loan schedules"
+              >
+                <span
+                  style={{
+                    display: 'inline-block',
+                    transform: recalculating ? 'rotate(360deg)' : 'none',
+                    transition: 'transform 0.5s linear',
+                  }}
+                >
+                  ↻
+                </span>
+                {recalculating ? 'Recalculating...' : 'Redo Calculations'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -503,17 +538,24 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
           {loans.map((loan) => {
             const isSelected = selectedLoanId === loan.id;
-            const isMidway = loan.elapsedMonths > 0;
+            const effectiveElapsed = Math.max(loan.elapsedMonths, loan.statementTxnCount2026);
+            const effectiveRemaining = loan.tenureMonths > 0 ? Math.max(0, loan.tenureMonths - effectiveElapsed) : loan.remainingMonths;
+            const isMidway = effectiveElapsed > 0;
             const isPrincipalReduced = loan.principalPaidSoFar > 0;
-            const progress = loan.percentPaid > 0 ? loan.percentPaid : loan.principalPercentPaid;
+            const progress =
+              loan.percentPaid > 0
+                ? loan.percentPaid
+                : effectiveElapsed > 0 && loan.tenureMonths > 0
+                  ? Math.round((effectiveElapsed / loan.tenureMonths) * 1000) / 10
+                  : loan.principalPercentPaid;
 
-            let badgeText = `${loan.remainingMonths} mos remaining`;
-            if (isMidway) {
-              badgeText = `${loan.elapsedMonths} of ${loan.tenureMonths} EMIs paid (${loan.percentPaid}%)`;
+            let badgeText = `${effectiveRemaining} mos remaining`;
+            if (isMidway && loan.tenureMonths > 0) {
+              badgeText = `${effectiveElapsed} of ${loan.tenureMonths} EMIs paid (${progress}%)`;
             } else if (isPrincipalReduced) {
               badgeText = `₹${compact(loan.principalPaidSoFar)} principal repaid (${loan.principalPercentPaid}%)`;
             } else if (loan.tenureMonths > 0) {
-              badgeText = `Active · ${loan.remainingMonths} mos remaining`;
+              badgeText = `Active · ${effectiveRemaining} mos remaining`;
             }
 
             return (
@@ -594,19 +636,23 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
                       {loan.contractualPaid > 0 ? 'Contract Repaid' : loan.principalPaidSoFar > 0 ? 'Principal Repaid' : 'Amount Paid'}
                     </div>
                     <div style={{ fontSize: 14, fontWeight: 600, color: colorPaid, marginTop: 2 }}>
-                      {fmtMoney(loan.contractualPaid || loan.principalPaidSoFar)}
+                      {fmtMoney(loan.contractualPaid || (effectiveElapsed * loan.emi) || loan.statementPaid2026 || loan.principalPaidSoFar)}
                     </div>
                     <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>
-                      {loan.elapsedMonths > 0 ? `${loan.elapsedMonths} EMIs completed` : loan.principalPaidSoFar > 0 ? `${loan.principalPercentPaid}% repaid` : '0 EMIs elapsed'}
+                      {effectiveElapsed > 0 ? `${effectiveElapsed} EMIs completed` : loan.principalPaidSoFar > 0 ? `${loan.principalPercentPaid}% repaid` : '0 EMIs elapsed'}
                     </div>
                   </div>
                   <div>
                     <div style={{ fontSize: 11, color: t.muted }}>To Be Paid</div>
                     <div style={{ fontSize: 14, fontWeight: 600, color: colorToBePaid, marginTop: 2 }}>
-                      {fmtMoney(loan.amountToBePaid)}
+                      {fmtMoney(
+                        effectiveRemaining > 0 && (loan.amountToBePaid === loan.tenureMonths * loan.emi || loan.amountToBePaid === 0)
+                          ? effectiveRemaining * loan.emi
+                          : loan.amountToBePaid,
+                      )}
                     </div>
                     <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>
-                      {loan.remainingMonths} EMIs left
+                      {effectiveRemaining} EMIs left
                     </div>
                   </div>
                 </div>

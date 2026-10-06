@@ -34,6 +34,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   loans: () => request<Loan[]>('/loans'),
   loanAnalytics: () => request<LoanAnalyticsResponse>('/loans/analytics'),
+  recalculateLoans: () =>
+    request<LoanAnalyticsResponse>('/loans/recalculate', { method: 'POST' }),
   createLoan: (loan: LoanDraft) =>
     request<Loan>('/loans', { method: 'POST', body: JSON.stringify(loan) }),
   updateLoan: (id: string, loan: LoanDraft) =>

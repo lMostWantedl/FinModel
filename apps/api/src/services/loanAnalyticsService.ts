@@ -1,6 +1,7 @@
-import { toMoney } from '@debt/engine';
+import { presentValue, toMoney } from '@debt/engine';
 import { prisma } from '../lib/prisma.js';
 import { rowToDomain } from './loanMapper.js';
+import { reconcileLoanEmis } from './ledgerService.js';
 
 export interface LoanAnalyticsItem {
   id: string;
@@ -96,15 +97,32 @@ export async function getLoansAnalytics(): Promise<LoanAnalyticsResponse> {
     rows.map(async (row) => {
       const domain = await rowToDomain(row);
       const tenure = domain.tenureMonths;
-      const remaining = domain.remainingMonths;
       const emi = toMoney(domain.emi);
-      const outstanding = toMoney(domain.outstandingAmount);
       const loanAmount = toMoney(domain.loanAmount);
       const totalRepayment = toMoney(domain.totalRepayment);
       const totalInterest = toMoney(domain.totalInterest);
 
-      // Contract schedule calculations
-      const elapsed = Math.max(0, tenure - remaining);
+      // Reconciled statement transactions
+      const ledgerInfo = ledgerByLoan.get(row.id) ?? { total: 0, count: 0, lastDate: null };
+      const verifiedDebits = ledgerInfo.count;
+
+      // Dynamic schedule sync:
+      // If statement debits have been verified, the elapsed EMIs is at least the verified debit count.
+      // (For loans dated before 2026, retain their prior elapsed months if higher).
+      const storedElapsed = Math.max(0, tenure - domain.remainingMonths);
+      const elapsed = Math.max(storedElapsed, verifiedDebits);
+      const remaining = Math.max(0, tenure - elapsed);
+
+      // Current outstanding balance:
+      // If payments have been verified, compute the amortized remaining principal balance.
+      let outstanding = toMoney(domain.outstandingAmount);
+      if (verifiedDebits > 0 && remaining < domain.remainingMonths) {
+        outstanding =
+          remaining > 0
+            ? Math.round(Number(presentValue(domain.annualInterestRate, emi, remaining)) * 100) / 100
+            : 0;
+      }
+
       const principalPaidSoFar = Math.max(0, Math.round((loanAmount - outstanding) * 100) / 100);
       const principalPercentPaid = loanAmount > 0 ? Math.round((principalPaidSoFar / loanAmount) * 1000) / 10 : 0;
 
@@ -113,11 +131,9 @@ export async function getLoansAnalytics(): Promise<LoanAnalyticsResponse> {
 
       // Contractual amount repaid since loan inception:
       const contractualPaid = elapsed > 0 ? Math.round(elapsed * emi * 100) / 100 : 0;
-
-      // Ground primary amountPaid in loan contract data
       const amountPaid = contractualPaid;
 
-      // Progress % based on loan contract tenure (or principal paid if elapsed is 0)
+      // Progress % based on loan contract tenure
       const percentPaid =
         tenure > 0
           ? Math.round((elapsed / tenure) * 1000) / 10
@@ -126,9 +142,6 @@ export async function getLoansAnalytics(): Promise<LoanAnalyticsResponse> {
       // Future interest remaining under contract
       const remainingInterest = Math.max(0, Math.round((amountToBePaid - outstanding) * 100) / 100);
       const interestPaidSoFar = Math.max(0, Math.round((contractualPaid - principalPaidSoFar) * 100) / 100);
-
-      // 2026 Bank Statement Payments (Reconciled from Jan 1, 2026)
-      const ledgerInfo = ledgerByLoan.get(row.id) ?? { total: 0, count: 0, lastDate: null };
 
       return {
         id: row.id,
@@ -210,4 +223,55 @@ export async function getLoansAnalytics(): Promise<LoanAnalyticsResponse> {
     },
     loans,
   };
+}
+
+/** Recalculate and synchronize all loan schedules with bank statement reconciled payments. */
+export async function recalculateLoans(): Promise<LoanAnalyticsResponse> {
+  // 1. Reconcile any unlinked statement entries with loans
+  await reconcileLoanEmis();
+
+  // 2. Fetch all loans and verified entries
+  const rows = await prisma.loan.findMany();
+  const ledgerEntries = await prisma.entry.findMany({
+    where: { loanId: { not: null }, kind: 'EXPENSE' },
+    select: { loanId: true, amount: true, date: true },
+  });
+
+  const ledgerByLoan = new Map<string, number>();
+  for (const e of ledgerEntries) {
+    if (!e.loanId) continue;
+    ledgerByLoan.set(e.loanId, (ledgerByLoan.get(e.loanId) ?? 0) + 1);
+  }
+
+  // 3. For each loan, sync its database record (remainingMonths and outstandingAmount)
+  for (const row of rows) {
+    const verifiedDebits = ledgerByLoan.get(row.id) ?? 0;
+    if (verifiedDebits === 0) continue;
+
+    const domain = await rowToDomain(row);
+    const tenure = domain.tenureMonths;
+    const emi = toMoney(domain.emi);
+    const storedElapsed = Math.max(0, tenure - domain.remainingMonths);
+    const elapsed = Math.max(storedElapsed, verifiedDebits);
+    const remaining = Math.max(0, tenure - elapsed);
+
+    let outstanding = toMoney(domain.outstandingAmount);
+    if (remaining < domain.remainingMonths) {
+      outstanding =
+        remaining > 0
+          ? Math.round(Number(presentValue(domain.annualInterestRate, emi, remaining)) * 100) / 100
+          : 0;
+    }
+
+    await prisma.loan.update({
+      where: { id: row.id },
+      data: {
+        remainingMonths: remaining,
+        outstandingAmount: outstanding,
+      },
+    });
+  }
+
+  // 4. Return the freshly recalculated analytics
+  return getLoansAnalytics();
 }

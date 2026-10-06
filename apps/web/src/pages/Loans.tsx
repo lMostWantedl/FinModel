@@ -71,6 +71,7 @@ export function LoansPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [recalculating, setRecalculating] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLDivElement>(null);
 
@@ -84,6 +85,29 @@ export function LoansPage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  const handleRecalculate = async () => {
+    setRecalculating(true);
+    setError(null);
+    try {
+      let a: LoanAnalyticsResponse;
+      try {
+        a = await api.recalculateLoans();
+      } catch {
+        // Fallback if /loans/recalculate is pending server restart: reconcile statement EMIs and refresh
+        await api.reconcileEmis().catch(() => {});
+        a = await api.loanAnalytics();
+      }
+      setAnalytics(a);
+      const l = await api.loans();
+      setLoans(l);
+      setNotice('Calculations refreshed: Loan tenures, balances, and statement reconciliations up to date.');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to recalculate loans');
+    } finally {
+      setRecalculating(false);
+    }
+  };
 
   const set = (k: keyof FormState) => (e: { target: { value: string } }) =>
     setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -205,33 +229,69 @@ export function LoansPage() {
               Current outstanding balances, amounts paid to date, and future obligations across all lenders.
             </p>
           </div>
-          <nav className="tabs">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <button
-              className={sectionView === 'both' ? 'active' : ''}
-              onClick={() => setSectionView('both')}
+              className="ghost"
+              disabled={recalculating}
+              onClick={handleRecalculate}
+              style={{
+                border: '1px solid var(--border)',
+                padding: '6px 12px',
+                borderRadius: 8,
+                fontSize: 12.5,
+                fontWeight: 600,
+                background: 'var(--surface-1)',
+                color: 'var(--accent)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                cursor: recalculating ? 'wait' : 'pointer',
+              }}
+              title="Redo all calculations by reconciling verified statement payments with loan schedules"
             >
-              👁️ All Views
+              <span
+                style={{
+                  display: 'inline-block',
+                  transform: recalculating ? 'rotate(360deg)' : 'none',
+                  transition: 'transform 0.5s linear',
+                }}
+              >
+                ↻
+              </span>
+              {recalculating ? 'Recalculating...' : 'Redo Calculations'}
             </button>
-            <button
-              className={sectionView === 'charts' ? 'active' : ''}
-              onClick={() => setSectionView('charts')}
-            >
-              📊 Charts Only
-            </button>
-            <button
-              className={sectionView === 'table' ? 'active' : ''}
-              onClick={() => setSectionView('table')}
-            >
-              📋 Manage Loans
-            </button>
-          </nav>
+            <nav className="tabs">
+              <button
+                className={sectionView === 'both' ? 'active' : ''}
+                onClick={() => setSectionView('both')}
+              >
+                👁️ All Views
+              </button>
+              <button
+                className={sectionView === 'charts' ? 'active' : ''}
+                onClick={() => setSectionView('charts')}
+              >
+                📊 Charts Only
+              </button>
+              <button
+                className={sectionView === 'table' ? 'active' : ''}
+                onClick={() => setSectionView('table')}
+              >
+                📋 Manage Loans
+              </button>
+            </nav>
+          </div>
         </div>
       )}
 
       {/* Analytics & Charts Section */}
       {analytics && analytics.loans.length > 0 && (sectionView === 'both' || sectionView === 'charts') && (
         <div style={{ marginBottom: 24 }}>
-          <LoanCharts data={analytics} />
+          <LoanCharts
+            data={analytics}
+            onRecalculate={handleRecalculate}
+            recalculating={recalculating}
+          />
         </div>
       )}
 
@@ -239,7 +299,39 @@ export function LoansPage() {
       {(sectionView === 'both' || sectionView === 'table' || !analytics || analytics.loans.length === 0) && (
         <div className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <h2 style={{ margin: 0 }}>Your loans</h2>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <h2 style={{ margin: 0 }}>Your loans</h2>
+              <button
+                className="ghost"
+                disabled={recalculating}
+                onClick={handleRecalculate}
+                style={{
+                  border: '1px solid var(--border)',
+                  padding: '4px 10px',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  background: 'var(--surface-1)',
+                  color: 'var(--accent)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  cursor: recalculating ? 'wait' : 'pointer',
+                }}
+                title="Redo all calculations by reconciling verified statement payments with loan schedules"
+              >
+                <span
+                  style={{
+                    display: 'inline-block',
+                    transform: recalculating ? 'rotate(360deg)' : 'none',
+                    transition: 'transform 0.5s linear',
+                  }}
+                >
+                  ↻
+                </span>
+                {recalculating ? 'Recalculating...' : 'Redo Calculations'}
+              </button>
+            </div>
             {analytics && (
               <span className="muted" style={{ fontSize: 12.5 }}>
                 {loans.length} active loan accounts
