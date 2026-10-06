@@ -227,7 +227,13 @@ export function LedgerPage() {
           )}
         </div>
         
-        <ExcelUploadDialog categories={categories} />
+        <ExcelUploadDialog
+          categories={categories}
+          onSuccess={() => {
+            void loadEntries();
+            setNotice('Bank statement entries successfully imported into ledger.');
+          }}
+        />
         <form className="grid" onSubmit={submit}>
           <label className="field">
             Date

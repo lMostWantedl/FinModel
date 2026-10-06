@@ -1,247 +1,137 @@
 import type { FastifyPluginAsync } from 'fastify';
-import multer from '@fastify/multipart';
+import { z } from 'zod';
+import { getAllCategories } from '../services/ledgerService.js';
+import { parseExcelStatement, saveBatchEntries, type BatchEntryInput } from '../services/ledgerExcelService.js';
 import { prisma } from '../lib/prisma.js';
-import { getAllCategories, parseDay } from '../services/ledgerService.js';
+
+const batchImportPayloadSchema = z.object({
+  entries: z.array(
+    z.object({
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      kind: z.enum(['INCOME', 'EXPENSE']),
+      amount: z.coerce.number().positive(),
+      categoryId: z.string().min(1),
+      method: z.enum(['CASH', 'BANK', 'UPI', 'CREDIT_CARD', 'OTHER']).default('BANK'),
+      note: z.string().max(500).optional().default(''),
+      description: z.string().max(500).nullish(),
+      debit: z.coerce.number().nonnegative().nullish(),
+      credit: z.coerce.number().nonnegative().nullish(),
+      balance: z.coerce.number().nullish(),
+      tags: z.array(z.string()).optional(),
+    }),
+  ),
+});
 
 export const entriesBatchRoutes: FastifyPluginAsync = async (app) => {
-  /** Maximum file size for Excel uploads (50MB) */
-  const MAX_EXCEL_SIZE = 50 * 1024 * 1024;
-
-  // Multer configuration for file uploads
-  app.post(
-    '/entries/batch/upload',
-    {
-      config: {
-        fileFilter: (req, file, cb) => {
-          const ext = (file as any).originalname?.split('.').pop()?.toLowerCase();
-          if (!ext || !['xlsx', 'xls'].includes(ext)) {
-            return cb(
-              new Error(`Only .xlsx and .xls files are allowed.`),
-              false,
-            );
-          }
-          cb(null, true);
-        },
-      },
-    },
-    async (req: { file?: any; body?: { categoryId: string } }) => {
-      const file = req.file;
-      if (!file) throw new Error('No file uploaded');
-
-      // Validate category ID
-      const categoryId = req.body.categoryId;
-      if (!categoryId || typeof categoryId !== 'string' || categoryId.trim() === '') {
-        throw new Error('categoryId is required and must be a valid string');
+  /**
+   * Parse an uploaded Excel spreadsheet (multipart/form-data).
+   * Returns parsed rows for interactive review and category assignment.
+   */
+  const handleUpload = async (req: any, reply: any) => {
+    try {
+      const data = await req.file();
+      if (!data) {
+        return reply.code(400).send({
+          success: false,
+          message: 'No file uploaded. Please upload a .xlsx or .xls file.',
+        });
       }
 
-      try {
-        const buffer = await file.toBuffer();
-        
-        // Parse the Excel file
-        const parseResult = await parseExcelForEntries(buffer);
-        
-        if (parseResult.success === 0) {
-          return {
-            success: 0,
-            entries: [],
-            errors: parseResult.errors,
-            message: `Could not parse any rows from the Excel file.`
-          };
-        }
+      const buffer = await data.toBuffer();
+      const parseResult = await parseExcelStatement(buffer);
 
-        // Create pending entries in database with category assigned
-        const entryData = [];
-        for (let i = 1; i <= parseResult.success; i++) {
-          entryData.push({
-            date: null,
-            kind: 'INCOME' as 'INCOME' | 'EXPENSE', // Will be corrected on approve based on debit/credit
-            amount: 0,
-            categoryId,
-            method: 'CASH',
-            note: '',
-            description: '',
-            tags: [],
-            source: 'PENDING_EXCEL' as const,
-          });
-        }
+      return reply.code(200).send({
+        success: true,
+        filename: data.filename,
+        count: parseResult.rowCount,
+        totalDebits: parseResult.totalDebits,
+        totalCredits: parseResult.totalCredits,
+        duplicateCount: parseResult.duplicateCount,
+        newCount: parseResult.newCount,
+        rows: parseResult.rows,
+        message:
+          parseResult.newCount === 0
+            ? `All ${parseResult.rowCount} transactions in this statement have already been imported.`
+            : `Parsed ${parseResult.rowCount} transactions (${parseResult.newCount} new, ${parseResult.duplicateCount} already in ledger).`,
+      });
+    } catch (err: any) {
+      app.log.error(err);
+      return reply.code(400).send({
+        success: false,
+        message: err.message || 'Failed to parse Excel spreadsheet',
+      });
+    }
+  };
 
-        if (entryData.length > 0) {
-          await prisma.entry.createMany({ data: entryData });
-          
-          // Fetch created entries to return them with full details
-          const newPending = await prisma.entry.findMany({
-            where: { 
-              source: 'PENDING_EXCEL',
-              amount: 0,
-              createdAt: { gte: new Date(Date.now() - 100) } // Very recent entries
-            },
-            orderBy: [{ createdAt: 'desc' }],
-            include: { category: true }
-          });
+  app.post('/entries/batch/upload', handleUpload);
+  app.post('/entries/batch/parse', handleUpload);
 
-          return {
-            success: parseResult.success,
-            entries: newPending.map((e) => ({
-              id: e.id,
-              srNo: Number(e.id.slice(0, 8)) || 1,
-              date: e.date?.toISOString().slice(0, 10) || null,
-              kind: e.kind as 'INCOME' | 'EXPENSE',
-              categoryId: e.categoryId,
-              categoryName: e.category.name,
-              description: e.description || '',
-              debit: e.debit ?? null,
-              credit: e.credit ?? null,
-              method: e.method || 'CASH',
-              note: e.note || '',
-              status: 'PENDING' as const,
-            })),
-            errors: parseResult.errors,
-            message: `Parsed ${parseResult.success} rows. You can now assign categories.`
-          };
-        }
+  /**
+   * Finalize and import approved batch entries into the ledger.
+   */
+  app.post('/entries/batch/import', async (req, reply) => {
+    const body = batchImportPayloadSchema.parse(req.body);
+    const result = await saveBatchEntries(body.entries as BatchEntryInput[]);
 
-      } catch (err) {
-        throw Object.assign(new Error('Failed to process Excel file'), { statusCode: 400 });
-      }
-    },
-  );
+    if (result.count === 0 && result.skippedDuplicates > 0) {
+      return reply.code(400).send({
+        success: false,
+        imported: 0,
+        skippedDuplicates: result.skippedDuplicates,
+        message: `All ${result.skippedDuplicates} transactions are already in your ledger. No new entries were imported.`,
+      });
+    }
 
-  /** Get all categories for the upload dialog */
-  app.get('/entries/batch/categories', async (_req) => {
+    return reply.code(201).send({
+      success: true,
+      imported: result.count,
+      skippedDuplicates: result.skippedDuplicates,
+      message:
+        result.skippedDuplicates > 0
+          ? `Successfully imported ${result.count} new entries (${result.skippedDuplicates} duplicates skipped).`
+          : `Successfully imported ${result.count} entries into ledger.`,
+    });
+  });
+
+  /**
+   * Backward-compatible approve endpoint.
+   */
+  app.post('/entries/batch/approve', async (req, reply) => {
+    const raw = req.body as any;
+    if (raw?.entries && Array.isArray(raw.entries)) {
+      const body = batchImportPayloadSchema.parse(raw);
+      const result = await saveBatchEntries(body.entries as BatchEntryInput[]);
+      return reply.code(200).send({
+        status: 'success',
+        approved: result.count,
+        skippedDuplicates: result.skippedDuplicates,
+        message: `Successfully approved ${result.count} entries (${result.skippedDuplicates} duplicates skipped).`,
+      });
+    }
+    return reply.code(200).send({
+      status: 'success',
+      approved: 0,
+      skippedDuplicates: 0,
+      message: 'No entries provided to approve.',
+    });
+  });
+
+  /** Get all categories for category mapping */
+  app.get('/entries/batch/categories', async () => {
     return getAllCategories();
   });
 
-  /** Approve pending Excel entries and add them to the ledger */
-  app.post('/entries/batch/approve', async (req, reply) => {
-    const entryIds = req.body.entryIds as string[];
-
-    // Validate at least one ID is provided
-    if (!entryIds || entryIds.length === 0) {
-      throw new Error('At least one entry ID must be provided for approval');
-    }
-
-    try {
-      // Fetch entries to approve
-      const entriesToApprove = await prisma.entry.findMany({
-        where: { id: { in: entryIds } },
-        include: { category: true }
-      });
-
-      let approvedCount = 0;
-      for (const entry of entriesToApprove) {
-        try {
-          const data: any = {
-            date: parseDay(entry.date),
-            kind: entry.kind,
-            amount: entry.amount || 0,
-            categoryId: entry.categoryId,
-            method: entry.method || 'CASH',
-            note: entry.note || '',
-            description: entry.description,
-            tagsJson: entry.tagsJson || '[]',
-          };
-
-          // Preserve debit/credit if they exist (for accounting)
-          if (entry.debit !== null && entry.debit > 0) {
-            data.debit = entry.debit;
-          }
-          if (entry.credit !== null && entry.credit > 0) {
-            data.credit = entry.credit;
-          }
-
-          const updatedEntry = await prisma.entry.update({
-            where: { id: entry.id },
-            data,
-          });
-
-          approvedCount++;
-        } catch (err) {
-          console.error(`Failed to approve entry ${entry.id}:`, err);
-        }
-      }
-
-      return reply.code(200).send({
-        status: 'success',
-        approved: approvedCount,
-        errors: [],
-        message: `Successfully approved ${approvedCount} entries.`
-      });
-
-    } catch (err) {
-      const error = err as { statusCode?: number; message?: string };
-      return reply.code(error.statusCode || 500).send({
-        status: 'error',
-        message: error.message || 'Failed to approve entries',
-      });
-    }
-  });
-
-  /** Delete a pending entry */
-  app.delete('/entries/batch/:id', async (req) => {
-    const { id } = req.params as { id: string };
-
-    try {
-      let existingEntry = await prisma.entry.findUnique({ where: { id } });
-
-      if (!existingEntry) {
-        throw Object.assign(new Error('Entry not found'), { statusCode: 404 });
-      }
-
-      const source = existingEntry.source as string;
-      if (!source.includes('PENDING') && source !== 'MANUAL') {
-        throw new Error('Only pending Excel entries can be deleted from the batch');
-      }
-
-      await prisma.entry.delete({ where: { id } });
-
-      return {
-        status: 'success',
-        message: `Deleted pending entry ${id}`,
-      };
-
-    } catch (err) {
-      const error = err as { statusCode?: number; message?: string };
-      return {
-        status: 'error',
-        statusCode: error.statusCode ?? 500,
-        message: error.message || 'Failed to delete entry',
-      };
-    }
-  });
-
-  /** Get pending entries for display */
-  app.get('/entries/batch/list', async (req) => {
-    try {
-      const pending = await prisma.entry.findMany({
-        where: { source: 'PENDING_EXCEL' },
-        include: { category: true },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      return {
-        status: 'success',
-        entries: pending.map((e) => ({
-          id: e.id,
-          srNo: Number(e.id.slice(0, 8)) || 1,
-          date: e.date?.toISOString().slice(0, 10) || null,
-          kind: e.kind,
-          categoryId: e.categoryId,
-          categoryName: e.category.name,
-          description: e.description || '',
-          debit: e.debit ?? null,
-          credit: e.credit ?? null,
-          method: e.method || 'CASH',
-          note: e.note || '',
-          status: 'PENDING' as const,
-        })),
-        count: pending.length,
-      };
-    } catch (err) {
-      return {
-        status: 'error',
-        statusCode: 500,
-        message: 'Failed to fetch pending entries',
-      };
-    }
+  /** Get recently imported entries */
+  app.get('/entries/batch/list', async () => {
+    const entries = await prisma.entry.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+      include: { category: true },
+    });
+    return {
+      status: 'success',
+      entries,
+      count: entries.length,
+    };
   });
 };

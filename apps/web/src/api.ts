@@ -16,7 +16,7 @@ import type {
   Summary,
 } from './types';
 
-export const API_BASE = import.meta.env.VITE_API_URL ?? 'http://finmodel.home:3001';
+export const API_BASE = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:3001';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -126,24 +126,73 @@ export const api = {
     opportunityRatePct: number;
   }) => request<SimulationPayload>('/simulate', { method: 'POST', body: JSON.stringify(body) }),
   excelUrl: `${API_BASE}/export/excel`,
+  parseBatchExcel: async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${API_BASE}/entries/batch/parse`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error(err?.message ?? `Upload failed with status ${res.status}`);
+    }
+    return res.json() as Promise<{
+      success: boolean;
+      filename: string;
+      count: number;
+      totalDebits: number;
+      totalCredits: number;
+      duplicateCount: number;
+      newCount: number;
+      rows: Array<{
+        srNo: number;
+        date: string;
+        kind: 'INCOME' | 'EXPENSE';
+        amount: number;
+        description: string;
+        debit: number | null;
+        credit: number | null;
+        balance: number | null;
+        suggestedCategory?: string;
+        isDuplicate?: boolean;
+      }>;
+      message: string;
+    }>;
+  },
+  importBatchEntries: (entries: Array<{
+    date: string;
+    kind: 'INCOME' | 'EXPENSE';
+    amount: number;
+    categoryId: string;
+    method?: string;
+    note?: string;
+    description?: string;
+    debit?: number | null;
+    credit?: number | null;
+    balance?: number | null;
+    tags?: string[];
+  }>) => request<{ success: boolean; imported: number; skippedDuplicates?: number; message: string }>('/entries/batch/import', {
+    method: 'POST',
+    body: JSON.stringify({ entries }),
+  }),
   batchCategories: () => request<{ id: string; name: string; kind: 'INCOME' | 'EXPENSE' }[]>('/entries/batch/categories'),
   uploadBatchPreview: (file: File, categoryId: string) => {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('categoryId', categoryId);
-    // Upload to main batch endpoint which returns parsed data directly
-    return request<{ 
-      success: number; 
-      entries?: Array<{ 
-        id: string; 
-        srNo: number; 
-        date: string | null; 
-        kind: 'INCOME' | 'EXPENSE'; 
-        categoryId: string; 
-        description: string | null; 
-        debit: number | null; 
-        credit: number | null; 
-        method: string; 
+    return request<{
+      success: number;
+      entries?: Array<{
+        id: string;
+        srNo: number;
+        date: string | null;
+        kind: 'INCOME' | 'EXPENSE';
+        categoryId: string;
+        description: string | null;
+        debit: number | null;
+        credit: number | null;
+        method: string;
         note: string;
         status: 'PENDING' | 'APPROVED'
       }>;

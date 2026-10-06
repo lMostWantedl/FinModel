@@ -17,6 +17,8 @@ const compact = (v: number) =>
 export interface CategoryDatum {
   name: string;
   amount: number;
+  lend?: number;
+  reimbursement?: number;
 }
 
 /**

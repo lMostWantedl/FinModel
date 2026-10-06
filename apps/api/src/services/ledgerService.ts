@@ -52,17 +52,16 @@ export async function seedPresetCategories(): Promise<void> {
 
 export const dateKey = (d: Date): string => d.toISOString().slice(0, 10);
 
-/** Get all categories for the Excel import dialog */
 export async function getAllCategories(): Promise<{ id: string; name: string; kind: 'INCOME' | 'EXPENSE' }[]> {
   const categories = await prisma.category.findMany({
     select: { id: true, name: true, kind: true },
     orderBy: [{ kind: 'asc' }, { name: 'asc' }],
   });
   
-  // Add type based on kind
   return categories.map((c) => ({
-    ...c,
-    type: c.kind, // INCOME or EXPENSE
+    id: c.id,
+    name: c.name,
+    kind: c.kind as 'INCOME' | 'EXPENSE',
   }));
 }
 export const monthKey = (d: Date): string => d.toISOString().slice(0, 7);

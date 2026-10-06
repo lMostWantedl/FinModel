@@ -1,536 +1,695 @@
 import ExcelJS from 'exceljs';
+import * as XLSX from 'xlsx';
 import { prisma } from '../lib/prisma.js';
-import { batchEntrySchema, entryBodySchema } from '../schemas.js';
-import { dateKey, parseDay } from './ledgerService.js';
+import { parseDay } from './ledgerService.js';
 
-/** Row data from the Excel spreadsheet matching: Sr.no | Date | Type | Description | Debit | Credit | Balance */
-export interface ExcelImportRow {
-  srNo?: number; // Row number (for display)
-  date?: string; // YYYY-MM-DD format
-  type?: string; // INCOME or EXPENSE (will be normalized)
-  description?: string; // Description/note for the entry
-  debit?: number; // Debit amount
-  credit?: number; // Credit amount
-  balance?: number; // Running balance after this entry
-}
-
-/** Type of entry in the Excel import */
-export interface ImportEntry {
+export interface ParsedStatementRow {
   srNo: number;
-  date: string | null;
+  date: string; // YYYY-MM-DD
   kind: 'INCOME' | 'EXPENSE';
-  categoryId: string;
-  description: string | null;
+  amount: number;
+  description: string;
   debit: number | null;
   credit: number | null;
   balance: number | null;
-  method: string;
-  note: string;
-  tags: string[];
-  status: 'PENDING' | 'APPROVED';
-  id?: string; // For pending entries, we'll generate IDs during approval
+  suggestedCategory?: string;
+  isDuplicate?: boolean;
 }
 
-/** Excel header aliases for flexible column naming */
-const HEADER_ALIASES: Record<string, string> = {
-  srNo: 'sr.no',
-  serial: 'serial',
-  serial_no: 'serial_no',
-  serno: 'serno',
-  no: 'no',
-  date: 'dt',
-  dt: 'dt',
-  dte: 'dte',
-  type: 'kind',
-  kind: 'type',
-  description: 'desc',
-  desc: 'desc',
-  note: 'notes',
-  notes: 'notes',
-  debit: 'dr',
-  dr: 'debit',
-  credit: 'cr',
-  cr: 'credit',
-  balance: 'bal',
-  bal: 'balance',
-  category: 'categoryId',
-  categoryId: 'category.id',
-  method: 'paymode',
-  paymode: 'method',
+export interface BatchEntryInput {
+  date: string;
+  kind: 'INCOME' | 'EXPENSE';
+  amount: number;
+  categoryId: string;
+  method?: string;
+  note?: string;
+  description?: string;
+  debit?: number | null;
+  credit?: number | null;
+  balance?: number | null;
+  tags?: string[];
+}
+
+const HEADER_KEYWORDS: Record<string, string[]> = {
+  date: ['date', 'dt', 'txn date', 'transaction date', 'value date'],
+  desc: ['description', 'desc', 'narration', 'particulars', 'remarks', 'details'],
+  debit: ['debit', 'dr', 'withdrawal', 'dr amount', 'debit amount'],
+  credit: ['credit', 'cr', 'deposit', 'cr amount', 'credit amount'],
+  type: ['type', 'kind', 'txn type', 'transaction type'],
+  balance: ['balance', 'bal', 'closing balance', 'running balance'],
+  srno: ['sr.no', 'sr no', 's.no', 'sl.no', 'no', 'serial', 'sno'],
 };
 
-/** Map Excel headers to their normalized internal names */
-function normalizeHeader(header: string): string | null {
-  const lower = header.toLowerCase().trim();
-  return HEADER_ALIASES[lower] || null;
-}
-
-/** Normalize type text to INCOME or EXPENSE - handles Transfer Debit/Credit and standard types */
-function normalizeType(type: unknown): 'INCOME' | 'EXPENSE' {
-  if (typeof type === 'string') {
-    const normalized = type.toLowerCase().trim();
-
-    // Handle Transfer Debit / Transfer Credit patterns first
-    if (normalized.includes('credit')) return 'INCOME';
-    if (normalized.includes('debit') && !normalized.includes('credit')) return 'EXPENSE';
-
-    // Standard type mappings
-    if (normalized === 'income') return 'INCOME';
-    if (normalized === 'expense') return 'EXPENSE';
-    if (normalized === 'withdrawal' || normalized === 'outgoing') return 'EXPENSE';
+function parseCellDate(val: unknown): string | null {
+  if (!val) return null;
+  if (val instanceof Date) {
+    if (isNaN(val.getTime())) return null;
+    return val.toISOString().slice(0, 10);
   }
-  throw new Error(`Invalid type: ${String(type)}. Use INCOME, EXPENSE, Transfer Debit, or Transfer Credit.`);
-}
-
-/** Extract date from Sr.no field (if it looks like a date) */
-function extractDateFromSrNo(srNoValue: unknown): string | null {
-  if (typeof srNoValue === 'string') {
-    const s = srNoValue.trim();
-    // Check if it's a valid date format (YYYY-MM-DD)
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (typeof val === 'number') {
+    // Excel date serial number
+    if (val > 20000 && val < 80000) {
+      const ms = (val - 25569) * 86400 * 1000;
+      const d = new Date(ms);
+      if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+    }
+    return null;
+  }
+  const s = String(val).trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+    return s.slice(0, 10);
+  }
+  const dmy = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (dmy) {
+    const day = dmy[1]!.padStart(2, '0');
+    const month = dmy[2]!.padStart(2, '0');
+    const year = dmy[3]!;
+    return `${year}-${month}-${day}`;
+  }
+  const ymd = s.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+  if (ymd) {
+    const year = ymd[1]!;
+    const month = ymd[2]!.padStart(2, '0');
+    const day = ymd[3]!.padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().slice(0, 10);
   }
   return null;
 }
 
-/** Extract actual row number from Excel row object */
-function extractRowNumber(worksheet: any, rowIndex: number): number {
-  try {
-    const rowObj = worksheet.getRow(rowIndex);
-    for (let col = 1; col <= rowObj.columns.length; col++) {
-      const cellValue = rowObj.getCell(col).value;
-      if (typeof cellValue === 'number' && Number.isInteger(cellValue) && cellValue > 0) {
-        return cellValue;
+function parseCellNumber(val: unknown): number | null {
+  if (val === null || val === undefined || val === '') return null;
+  if (typeof val === 'number') {
+    return isNaN(val) ? null : val;
+  }
+  if (typeof val === 'string') {
+    const clean = val.replace(/[^0-9.-]/g, '');
+    if (!clean) return null;
+    const num = Number(clean);
+    return isNaN(num) ? null : num;
+  }
+  return null;
+}
+
+function guessCategory(desc: string, kind: 'INCOME' | 'EXPENSE'): string {
+  const s = desc.toLowerCase();
+  if (kind === 'INCOME') {
+    if (s.includes('salary') || s.includes('payroll')) return 'Salary';
+    if (s.includes('interest') || s.includes('int.pd') || s.includes('int.coll')) return 'Interest';
+    if (s.includes('reimburse')) return 'Reimbursement';
+    return 'Other income';
+  } else {
+    if (s.includes('swiggy') || s.includes('zomato') || s.includes('mcdonald') || s.includes('restaurant') || s.includes('starbucks'))
+      return 'Food & dining';
+    if (s.includes('grocery') || s.includes('supermarket') || s.includes('bigbasket') || s.includes('dmart') || s.includes('blinkit') || s.includes('zepto') || s.includes('instamart'))
+      return 'Groceries';
+    if (s.includes('uber') || s.includes('ola') || s.includes('fuel') || s.includes('petrol') || s.includes('hpcl') || s.includes('bpcl') || s.includes('metro') || s.includes('irctc'))
+      return 'Transport';
+    if (s.includes('electricity') || s.includes('bescom') || s.includes('water') || s.includes('gas') || s.includes('broadband') || s.includes('airtel') || s.includes('jio'))
+      return 'Utilities';
+    if (s.includes('netflix') || s.includes('spotify') || s.includes('prime') || s.includes('youtube') || s.includes('hotstar'))
+      return 'Subscriptions';
+    if (s.includes('hospital') || s.includes('pharmacy') || s.includes('apollo') || s.includes('medplus') || s.includes('doctor') || s.includes('clinic') || s.includes('1mg'))
+      return 'Health';
+    if (s.includes('amazon') || s.includes('flipkart') || s.includes('myntra') || s.includes('zara') || s.includes('shopping'))
+      return 'Shopping';
+    if (s.includes('rent')) return 'Rent';
+    if (s.includes('emi') || s.includes('loan')) return 'EMI';
+    if (s.includes('lend')) return 'Lend';
+    return 'Other';
+  }
+}
+
+/** Fallback parser for SheetJS (handles legacy .xls BIFF8, CSV, and HTML tables) */
+function parseSheetJSRows(sheet: XLSX.WorkSheet): {
+  rows: ParsedStatementRow[];
+  totalDebits: number;
+  totalCredits: number;
+  rowCount: number;
+} {
+  const data = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, raw: false, defval: '' });
+  if (!data || data.length === 0) {
+    throw Object.assign(new Error('Worksheet is empty'), { statusCode: 400 });
+  }
+
+  let bestHeaderRow = -1;
+  let bestScore = 0;
+  let bestColMap: Record<string, number> = {};
+
+  const scanLimit = Math.min(data.length, 50);
+  for (let r = 0; r < scanLimit; r++) {
+    const row = data[r] || [];
+    const colMap: Record<string, number> = {};
+    let score = 0;
+
+    for (let c = 0; c < row.length; c++) {
+      const cellText = String(row[c] || '').trim().toLowerCase();
+      if (!cellText) continue;
+
+      for (const [category, keywords] of Object.entries(HEADER_KEYWORDS)) {
+        let matched = false;
+        for (const kw of keywords) {
+          if (cellText === kw) {
+            matched = true;
+            break;
+          } else if (kw.length > 2 && cellText.includes(kw)) {
+            matched = true;
+            break;
+          }
+        }
+        if (matched && !(category in colMap)) {
+          colMap[category] = c;
+          score += 1;
+          break;
+        }
       }
     }
-  } catch (err) {
-    // Fallback to index-based number
-  }
-  return rowIndex - 1; // Use 1-based row index as srNo if no valid number found
-}
 
-/** Calculate amount from debit/credit fields (single-value rows) */
-function calculateAmount(debit: number | null, credit: number | null): number | null {
-  // Only one of debit or credit should have a value in this format
-  if ((debit !== null && debit > 0) || (credit !== null && credit > 0)) {
-    return debit ?? credit;
-  }
-  return null;
-}
-
-/** Convert Excel row to ImportEntry */
-export function excelRowToImport(row: Partial<ExcelImportRow>, categoryId: string): ImportEntry | null {
-  // Skip empty rows
-  const srNo = row.srNo || Number(row['Sr.no']) || Number(row.serial) || Number(row['serial_no']);
-  if (!srNo && !row.date && !row.type) return null;
-
-  const date = row.date ? String(row.date).trim() : null;
-  const typeRaw = row.type || 'INCOME';
-  const kind = normalizeType(typeRaw);
-
-  // Extract debit/credit values (one column will have value, the other empty in this format)
-  const debitValue: number | null = Array.isArray(row.debit) ? Number(row.debit[0]) : Number(row.debit) || null;
-  const creditValue: number | null = Array.isArray(row.credit) ? Number(row.credit[0]) : Number(row.credit) || null;
-
-  // Extract description (may be array from ExcelJS)
-  const description = typeof row.description === 'string' 
-    ? row.description 
-    : Array.isArray(row.description) && row.description.length > 0 ? String(row.description[0]) : null;
-
-  const note = typeof row.note === 'string' ? row.note.trim() : description?.trim() || '';
-  const method = typeof row.method === 'string' 
-    ? row.method.toUpperCase().replace(/[^A-Z]/g, '') 
-    : 'CASH';
-
-  let tags: string[] = [];
-  if (typeof row.tags === 'string') {
-    tags = row.tags.split(',').map((t) => t.trim()).filter((t) => t);
-  } else if (Array.isArray(row.tags)) {
-    tags = row.tags.filter((t) => typeof t === 'string' && t.trim());
+    if (colMap['date'] && (colMap['debit'] || colMap['credit'] || colMap['desc'])) {
+      if (score > bestScore) {
+        bestScore = score;
+        bestHeaderRow = r;
+        bestColMap = colMap;
+      }
+    }
   }
 
-  const amount = calculateAmount(debitValue, creditValue);
-  
-  if (!amount && !debitValue && !creditValue) {
-    // No valid numeric value found - this is an error for this row format
-    return null;
+  if (bestHeaderRow === -1) {
+    throw Object.assign(
+      new Error(
+        'Could not identify table headers in spreadsheet. Expected columns like Date, Description, Debit, Credit.',
+      ),
+      { statusCode: 400 },
+    );
+  }
+
+  const rows: ParsedStatementRow[] = [];
+  let totalDebits = 0;
+  let totalCredits = 0;
+
+  for (let r = bestHeaderRow + 1; r < data.length; r++) {
+    const row = data[r] || [];
+    const dateVal = bestColMap['date'] !== undefined ? parseCellDate(row[bestColMap['date']]) : null;
+    const descVal = bestColMap['desc'] !== undefined ? String(row[bestColMap['desc']] || '').trim() : '';
+    const typeVal =
+      bestColMap['type'] !== undefined ? String(row[bestColMap['type']] || '').trim().toLowerCase() : '';
+    const drVal = bestColMap['debit'] !== undefined ? parseCellNumber(row[bestColMap['debit']]) : null;
+    const crVal = bestColMap['credit'] !== undefined ? parseCellNumber(row[bestColMap['credit']]) : null;
+    const balVal = bestColMap['balance'] !== undefined ? parseCellNumber(row[bestColMap['balance']]) : null;
+    const srNoVal = bestColMap['srno'] !== undefined ? parseCellNumber(row[bestColMap['srno']]) : null;
+
+    if (!dateVal && !descVal && drVal === null && crVal === null) continue;
+
+    const isCredit = typeVal.includes('credit') || (crVal !== null && crVal > 0);
+    const kind: 'INCOME' | 'EXPENSE' = isCredit ? 'INCOME' : 'EXPENSE';
+    const amount = isCredit ? (crVal ?? drVal ?? 0) : (drVal ?? crVal ?? 0);
+
+    if (amount <= 0 && !descVal) continue;
+
+    if (kind === 'INCOME') totalCredits += amount;
+    else totalDebits += amount;
+
+    rows.push({
+      srNo: srNoVal ?? rows.length + 1,
+      date: dateVal || new Date().toISOString().slice(0, 10),
+      kind,
+      amount,
+      description: descVal,
+      debit: drVal,
+      credit: crVal,
+      balance: balVal,
+      suggestedCategory: guessCategory(descVal, kind),
+    });
   }
 
   return {
-    srNo,
-    date,
-    kind,
-    categoryId,
-    description: description || null,
-    debit: debitValue,
-    credit: creditValue,
-    balance: row.balance ?? null, // Store for reference if present
-    method,
-    note,
-    tags,
-    status: 'PENDING',
+    rows,
+    totalDebits: Math.round(totalDebits * 100) / 100,
+    totalCredits: Math.round(totalCredits * 100) / 100,
+    rowCount: rows.length,
+  };
+}
+
+/**
+ * Generate a consistent transaction fingerprint for deduplication.
+ */
+export function buildEntryFingerprint(
+  item: {
+    date: string | Date;
+    kind: string;
+    amount: number;
+    description?: string | null;
+    note?: string | null;
+    balance?: number | null;
+  },
+  includeBalance = true,
+): string {
+  const dateStr = typeof item.date === 'string' ? item.date.slice(0, 10) : item.date.toISOString().slice(0, 10);
+  const kindStr = item.kind.toUpperCase();
+  const amtStr = Number(item.amount).toFixed(2);
+  const descStr = (item.description || item.note || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  const balStr =
+    includeBalance && item.balance !== null && item.balance !== undefined
+      ? Number(item.balance).toFixed(2)
+      : '';
+  return `${dateStr}__${kindStr}__${amtStr}__${descStr}__${balStr}`;
+}
+
+/**
+ * Annotate parsed rows with duplicate status by checking existing database records.
+ */
+export async function annotateDuplicates(rows: ParsedStatementRow[]): Promise<{
+  rows: ParsedStatementRow[];
+  duplicateCount: number;
+  newCount: number;
+}> {
+  if (rows.length === 0) {
+    return { rows: [], duplicateCount: 0, newCount: 0 };
+  }
+
+  // Get date range from rows with buffer for timezone differences
+  const dates = rows.map((r) => r.date).filter(Boolean);
+  let existingEntries: Array<{
+    date: Date;
+    kind: string;
+    amount: number;
+    description: string | null;
+    note: string | null;
+    balance: number | null;
+  }> = [];
+
+  if (dates.length > 0) {
+    const sorted = [...dates].sort();
+    const minDate = new Date(`${sorted[0]}T00:00:00.000Z`);
+    minDate.setUTCDate(minDate.getUTCDate() - 1);
+    const maxDate = new Date(`${sorted[sorted.length - 1]}T23:59:59.999Z`);
+    maxDate.setUTCDate(maxDate.getUTCDate() + 1);
+
+    existingEntries = await prisma.entry.findMany({
+      where: {
+        date: {
+          gte: minDate,
+          lte: maxDate,
+        },
+      },
+      select: {
+        date: true,
+        kind: true,
+        amount: true,
+        description: true,
+        note: true,
+        balance: true,
+      },
+    });
+  }
+
+  // Multiset counter for existing entries
+  const exactCounts = new Map<string, number>();
+  const noBalCounts = new Map<string, number>();
+
+  for (const e of existingEntries) {
+    const exactKey = buildEntryFingerprint(e, true);
+    exactCounts.set(exactKey, (exactCounts.get(exactKey) || 0) + 1);
+
+    if (e.balance === null || e.balance === undefined) {
+      const noBalKey = buildEntryFingerprint(e, false);
+      noBalCounts.set(noBalKey, (noBalCounts.get(noBalKey) || 0) + 1);
+    }
+  }
+
+  let duplicateCount = 0;
+  for (const row of rows) {
+    const exactKey = buildEntryFingerprint(row, true);
+    const exactAvailable = exactCounts.get(exactKey) || 0;
+
+    if (exactAvailable > 0) {
+      row.isDuplicate = true;
+      duplicateCount++;
+      exactCounts.set(exactKey, exactAvailable - 1);
+      continue;
+    }
+
+    // Fallback: if row has balance but DB entry had balance null
+    if (row.balance !== null && row.balance !== undefined) {
+      const noBalKey = buildEntryFingerprint(row, false);
+      const noBalAvailable = noBalCounts.get(noBalKey) || 0;
+      if (noBalAvailable > 0) {
+        row.isDuplicate = true;
+        duplicateCount++;
+        noBalCounts.set(noBalKey, noBalAvailable - 1);
+        continue;
+      }
+    }
+
+    row.isDuplicate = false;
+  }
+
+  return {
+    rows,
+    duplicateCount,
+    newCount: rows.length - duplicateCount,
   };
 }
 
 /** Parse an uploaded Excel file for income/expense entries */
-export async function parseExcelForEntries(
+export async function parseExcelStatement(
   buffer: Buffer,
-): Promise<{ success: number; errors: string[] }> {
-  const workbook = new ExcelJS.Workbook();
-  try {
-    await workbook.xlsx.load(buffer);
-  } catch (err) {
-    throw Object.assign(new Error('Failed to parse Excel file'), { statusCode: 400 });
-  }
+): Promise<{
+  rows: ParsedStatementRow[];
+  totalDebits: number;
+  totalCredits: number;
+  rowCount: number;
+  duplicateCount: number;
+  newCount: number;
+}> {
+  let parsed: {
+    rows: ParsedStatementRow[];
+    totalDebits: number;
+    totalCredits: number;
+    rowCount: number;
+  };
 
-  const worksheet = workbook.getWorksheet(1) || workbook.worksheets[0];
-  
-  // Find the first row with data
-  let headerRow = -1;
-  for (let i = 1; i <= worksheet.rowCount; i++) {
-    const rowValues = worksheet.getRow(i).values as unknown[];
-    const hasData = rowValues.some((v) => v !== undefined && v !== null && String(v).trim() !== '');
-    if (hasData) headerRow = i;
-  }
-
-  if (headerRow === -1) {
-    throw new Error('No data found in Excel file');
-  }
-
-  const normalizedHeaders: Record<string, string | null> = {};
-  for (let col = 1; col <= worksheet.columns.length; col++) {
-    const headerText = String(worksheet.getCell(`A${headerRow}`)?.value || '').trim();
-    normalizedHeaders[col] = normalizeHeader(headerText);
-  }
-
-  // Map columns to indices
-  const dateColIndex: number | null = Object.values(normalizedHeaders).findIndex(
-    (h) => h === 'date',
-  );
-  const typeColIndex: number | null = Object.values(normalizedHeaders).findIndex(
-    (h) => h === 'kind' || h === 'type',
-  );
-  const descColIndex: number | null = Object.values(normalizedHeaders).findIndex(
-    (h) => h === 'description' || h === 'desc' || h === 'note',
-  );
-  const debitColIndex: number | null = Object.values(normalizedHeaders).findIndex(
-    (h) => h === 'debit' || h === 'dr',
-  );
-  const creditColIndex: number | null = Object.values(normalizedHeaders).findIndex(
-    (h) => h === 'credit' || h === 'cr' || h === 'bal',
-  );
-  const balanceColIndex: number | null = Object.values(normalizedHeaders).findIndex(
-    (h) => h === 'balance' || h === 'bal',
-  );
-
-  const validColumns = ['date', 'kind', 'type', 'description', 'debit', 'credit', 'balance'];
-  if (!validColumns.some((c) => Object.values(normalizedHeaders).includes(c))) {
-    throw new Error('Invalid Excel format. Expected columns: Sr.no, Date, Type, Description, Debit, Credit, Balance');
-  }
-
-  const rows: ImportEntry[] = [];
-  const errors: string[] = [];
-
-  // Skip header row
-  for (let i = headerRow + 1; i <= worksheet.rowCount; i++) {
+  // 1. Check if file is OLE2 Compound Document (magic bytes 0xD0CF11E0)
+  // This indicates either a legacy Excel 97-2004 (.xls) file OR an encrypted/password-protected .xlsx file!
+  if (buffer.length >= 8 && buffer[0] === 0xd0 && buffer[1] === 0xcf && buffer[2] === 0x11 && buffer[3] === 0xe0) {
     try {
-      const rowValues = worksheet.getRow(i).values as unknown[];
-      const srNoVal = Number(rowValues[0]);
-      if (!srNoVal) continue; // Skip empty rows
-
-      // Extract values based on normalized header positions
-      const dateValue: string | null = Array.isArray(rowValues[dateColIndex!])
-        ? String(rowValues[dateColIndex!]).trim() || null
-        : rowValues[dateColIndex!] && String(rowValues[dateColIndex!]).trim()
-          ? String(rowValues[dateColIndex!]).trim()
-          : null;
-
-      const typeValue: string = Array.isArray(rowValues[typeColIndex!])
-        ? String(rowValues[typeColIndex!]).toUpperCase().trim()
-        : rowValues[typeColIndex!] && String(rowValues[typeColIndex!]).toUpperCase().trim()
-          ? String(rowValues[typeColIndex!]).toUpperCase().trim()
-          : 'INCOME';
-
-      const descriptionValue: string | null = Array.isArray(rowValues[descColIndex!])
-        ? (rowValues[descColIndex!]?.toString()?.trim() || null)
-        : rowValues[descColIndex!] && String(rowValues[descColIndex!]).trim()
-          ? String(rowValues[descColIndex!]).trim()
-          : null;
-
-      const debitValue: number | null = Array.isArray(rowValues[debitColIndex!])
-        ? Number(rowValues[debitColIndex!]) || null
-        : rowValues[debitColIndex!] && typeof rowValues[debitColIndex!] === 'number'
-          ? rowValues[debitColIndex!]
-          : null;
-
-      const creditValue: number | null = Array.isArray(rowValues[creditColIndex!])
-        ? Number(rowValues[creditColIndex!]) || null
-        : rowValues[creditColIndex!] && typeof rowValues[creditColIndex!] === 'number'
-          ? rowValues[creditColIndex!]
-          : null;
-
-      const balanceValue: number | null = Array.isArray(rowValues[balanceColIndex!])
-        ? Number(rowValues[balanceColIndex!]) || null
-        : rowValues[balanceColIndex!] && typeof rowValues[balanceColIndex!] === 'number'
-          ? rowValues[balanceColIndex!]
-          : null;
-
-      const entry = excelRowToImport(
-        {
-          srNo,
-          date: dateValue,
-          type: typeValue,
-          description: descriptionValue,
-          debit: debitValue,
-          credit: creditValue,
-          balance: balanceValue,
-        },
-        // categoryId will be set by the route handler
+      const wb = XLSX.read(buffer, { type: 'buffer' });
+      const sheetName = wb.SheetNames[0];
+      const firstSheet = sheetName ? wb.Sheets[sheetName] : undefined;
+      if (!firstSheet) throw new Error('Worksheet is empty');
+      parsed = parseSheetJSRows(firstSheet);
+    } catch (err: any) {
+      if (err.message && err.message.toLowerCase().includes('password')) {
+        throw Object.assign(
+          new Error(
+            'This statement is password-protected by your bank. Please open it in Microsoft Excel, enter your password, and "Save As" an unprotected .xlsx workbook (e.g. Statements2.xlsx) before uploading.',
+          ),
+          { statusCode: 400 },
+        );
+      }
+      throw Object.assign(
+        new Error(
+          'This file is encrypted or in legacy binary Excel (.xls) format that could not be decrypted. Please save it as an unprotected .xlsx workbook in Excel and re-upload.',
+        ),
+        { statusCode: 400 },
       );
-      
-      if (entry) {
-        rows.push(entry);
-      } else {
-        errors.push(`Row ${srNo}: Could not parse entry`);
-      }
-    } catch (err) {
-      const rowNum = i - headerRow + 1;
-      errors.push(`Row ${rowNum}: ${String(err)}: ${typeof rowValues[0] === 'number' ? rowValues[0] : String(rowValues[0])}`);
-    }
-  }
-
-  return { success: rows.length, errors };
-}
-
-/** Create pending batch entries for approval */
-export async function createPendingBatchEntries(
-  entries: ImportEntry[],
-  categoryId: string,
-): Promise<{ success: number; created: number; skipped: number }> {
-  const category = await prisma.category.findUnique({ where: { id: categoryId } });
-  if (!category) throw Object.assign(new Error('Category not found'), { statusCode: 404 });
-
-  const now = new Date();
-  let createdCount = 0;
-  let skippedCount = 0;
-
-  for (const entry of entries) {
-    try {
-      // Calculate amount from the non-null debit/credit value
-      const amount = calculateAmount(entry.debit, entry.credit);
-
-      if (!amount && !entry.debit && !entry.credit) {
-        skippedCount++;
-        continue;
-      }
-
-      const data: any = {
-        date: entry.date ? parseDay(entry.date) : now,
-        kind: entry.kind,
-        categoryId: category.id,
-        description: entry.description,
-        status: 'PENDING',
-      };
-
-      if (amount !== null && amount > 0) {
-        data.amount = parseFloat(amount.toFixed(2));
-      } else {
-        // Set debit/credit values as needed for accounting entries
-        if (entry.debit !== null) data.debit = entry.debit;
-        if (entry.credit !== null) data.credit = entry.credit;
-      }
-
-      if (entry.note && entry.note.trim()) {
-        data.note = entry.note.trim();
-      } else if (entry.description?.trim()) {
-        data.note = entry.description.trim();
-      }
-
-      if (entry.method && ['CASH', 'BANK', 'UPI', 'CREDIT_CARD'].includes(entry.method)) {
-        data.method = entry.method;
-      }
-
-      // Handle tags
-      if (entry.tags && entry.tags.length > 0) {
-        const validTags: string[] = [];
-        for (const tag of entry.tags) {
-          const cleanTag = String(tag).trim();
-          if (cleanTag && cleanTag.length > 0 && cleanTag.length <= 20) {
-            validTags.push(cleanTag);
-          }
-        }
-        if (validTags.length > 0) data.tagsJson = JSON.stringify(validTags.slice(0, 10));
-      }
-
-      const newEntry = await prisma.entry.create({ data });
-      
-      // Create a pending entry for approval - we'll use source field to mark as pending
-      // Actually, we need a separate field. Let's add status as part of the note or create a separate record
-      // For now, let's mark with a special prefix in note
-      
-      await prisma.entry.update({
-        where: { id: newEntry.id },
-        data: { 
-          source: 'PENDING_EXCEL' || undefined,
-          note: (entry.note || entry.description || '') + 
-                (entry.note ? ` [pending Excel approval]` : '') || '' 
-        }
-      });
-
-      createdCount++;
-    } catch (err) {
-      console.error(`Failed to create batch entry ${entry.srNo}:`, err);
-      skippedCount++;
-    }
-  }
-
-  return { success: entries.length, created: createdCount, skipped: skippedCount };
-}
-
-/** Approve pending Excel entries and convert them to regular entries */
-export async function approvePendingExcelEntries(
-  entryIds?: string[],
-): Promise<{ approved: number; failed: number; errors: string[] }> {
-  let approvedCount = 0;
-  let failedCount = 0;
-  const errors: string[] = [];
-
-  // Fetch all pending Excel entries if no IDs provided
-  let entriesToApprove;
-  if (entryIds && entryIds.length > 0) {
-    try {
-      entriesToApprove = await prisma.entry.findMany({
-        where: { id: { in: entryIds } },
-      });
-    } catch (err) {
-      throw Object.assign(new Error('Failed to fetch entries'), { statusCode: 500 });
     }
   } else {
-    const pendingEntries = await prisma.entry.findMany({
-      where: { source: 'PENDING_EXCEL' },
-      include: { category: true },
-    });
-    entriesToApprove = pendingEntries;
-  }
-
-  for (const entry of entriesToApprove) {
+    // 2. Try parsing as OpenXML (.xlsx) using ExcelJS
+    const workbook = new ExcelJS.Workbook();
     try {
-      const source = entry.source as string;
-      
-      if (!source.includes('PENDING')) {
-        continue; // Not a pending Excel entry
-      }
-
-      const data: any = {
-        date: parseDay(entry.date),
-        kind: entry.kind,
-        amount: entry.amount,
-        categoryId: entry.categoryId,
-        method: entry.method || 'CASH',
-        note: entry.note || '',
-        description: entry.description,
-        tagsJson: entry.tagsJson || '[]',
-      };
-
-      // Preserve debit/credit if they exist (for accounting)
-      if (entry.debit !== null && entry.debit > 0) {
-        data.debit = entry.debit;
-      }
-      if (entry.credit !== null && entry.credit > 0) {
-        data.credit = entry.credit;
-      }
-      if (entry.balance !== null) {
-        data.balance = entry.balance;
-      }
-
-      const existingEntry = await prisma.entry.findUnique({ where: { id: entry.id } });
-      if (!existingEntry) {
-        throw Object.assign(new Error('Entry not found'), { statusCode: 404 });
-      }
-
-      const updatedEntry = await prisma.entry.update({
-        where: { id: entry.id },
-        data: {
-          date: data.date,
-          kind: data.kind,
-          amount: data.amount ?? existingEntry.amount,
-          categoryId: data.categoryId,
-          method: data.method,
-          note: data.note,
-          description: data.description,
-          tagsJson: data.tagsJson,
-        },
-      });
-
-      // Now delete the original pending entry (without debit/credit fields)
-      await prisma.entry.update({
-        where: { id: entry.id },
-        data: { 
-          source: 'MANUAL' || undefined, // Remove pending flag
+      await workbook.xlsx.load(buffer as any);
+    } catch (err: any) {
+      // If ExcelJS fails because it's not a valid zip archive, check if it's password protected or alternative format
+      if (
+        err.message?.includes("Can't find end of central directory") ||
+        err.message?.includes('is this a zip file') ||
+        err.message?.includes('Corrupted zip')
+      ) {
+        try {
+          const wb = XLSX.read(buffer, { type: 'buffer' });
+          const sheetName = wb.SheetNames[0];
+          const firstSheet = sheetName ? wb.Sheets[sheetName] : undefined;
+          if (!firstSheet) throw new Error('Worksheet is empty');
+          parsed = parseSheetJSRows(firstSheet);
+        } catch (xlsxErr: any) {
+          if (xlsxErr.message && xlsxErr.message.toLowerCase().includes('password')) {
+            throw Object.assign(
+              new Error(
+                'This statement is password-protected by your bank. Please open it in Microsoft Excel, enter your password, and "Save As" an unprotected .xlsx workbook (e.g. Statements2.xlsx) before uploading.',
+              ),
+              { statusCode: 400 },
+            );
+          }
+          throw Object.assign(
+            new Error(
+              'The uploaded file is not a valid or unencrypted .xlsx workbook. If this bank statement is password-protected, please open it in Excel, enter your password, and "Save As" an unprotected .xlsx file before uploading.',
+            ),
+            { statusCode: 400 },
+          );
         }
-      });
+      } else {
+        throw err;
+      }
+    }
 
-      approvedCount++;
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-      errors.push(`Entry ${entry.id}: ${errorMsg}`);
-      failedCount++;
+    if (!parsed!) {
+      const worksheet = workbook.worksheets[0];
+      if (!worksheet || worksheet.rowCount === 0) {
+        throw Object.assign(new Error('Worksheet is empty'), { statusCode: 400 });
+      }
+
+      // Scan rows 1 to 50 for the header row
+      let bestHeaderRow = -1;
+      let bestScore = 0;
+      let bestColMap: Record<string, number> = {};
+
+      const scanLimit = Math.min(worksheet.rowCount, 50);
+      for (let r = 1; r <= scanLimit; r++) {
+        const row = worksheet.getRow(r);
+        const colMap: Record<string, number> = {};
+        let score = 0;
+
+        for (let c = 1; c <= Math.max(row.cellCount, 20); c++) {
+          const cellText = String(row.getCell(c).text || row.getCell(c).value || '')
+            .trim()
+            .toLowerCase();
+          if (!cellText) continue;
+
+          for (const [category, keywords] of Object.entries(HEADER_KEYWORDS)) {
+            let matched = false;
+            for (const kw of keywords) {
+              if (cellText === kw) {
+                matched = true;
+                break;
+              } else if (kw.length > 2 && cellText.includes(kw)) {
+                matched = true;
+                break;
+              }
+            }
+            if (matched && !(category in colMap)) {
+              colMap[category] = c;
+              score += 1;
+              break;
+            }
+          }
+        }
+
+        if (colMap['date'] && (colMap['debit'] || colMap['credit'] || colMap['desc'])) {
+          if (score > bestScore) {
+            bestScore = score;
+            bestHeaderRow = r;
+            bestColMap = colMap;
+          }
+        }
+      }
+
+      if (bestHeaderRow === -1) {
+        throw Object.assign(
+          new Error('Could not identify table headers in spreadsheet. Expected columns like Date, Description, Debit, Credit.'),
+          { statusCode: 400 },
+        );
+      }
+
+      const rows: ParsedStatementRow[] = [];
+      let totalDebits = 0;
+      let totalCredits = 0;
+
+      for (let r = bestHeaderRow + 1; r <= worksheet.rowCount; r++) {
+        const row = worksheet.getRow(r);
+
+        const dateVal = bestColMap['date'] ? parseCellDate(row.getCell(bestColMap['date']).value) : null;
+        const descVal = bestColMap['desc']
+          ? String(row.getCell(bestColMap['desc']).text || row.getCell(bestColMap['desc']).value || '').trim()
+          : '';
+        const typeVal = bestColMap['type']
+          ? String(row.getCell(bestColMap['type']).text || row.getCell(bestColMap['type']).value || '').trim().toLowerCase()
+          : '';
+        const drVal = bestColMap['debit'] ? parseCellNumber(row.getCell(bestColMap['debit']).value) : null;
+        const crVal = bestColMap['credit'] ? parseCellNumber(row.getCell(bestColMap['credit']).value) : null;
+        const balVal = bestColMap['balance'] ? parseCellNumber(row.getCell(bestColMap['balance']).value) : null;
+        const srNoVal = bestColMap['srno'] ? parseCellNumber(row.getCell(bestColMap['srno']).value) : null;
+
+        // Skip empty rows
+        if (!dateVal && !descVal && drVal === null && crVal === null) {
+          continue;
+        }
+
+        // Determine direction
+        const isCredit = typeVal.includes('credit') || (crVal !== null && crVal > 0);
+        const kind: 'INCOME' | 'EXPENSE' = isCredit ? 'INCOME' : 'EXPENSE';
+        const amount = isCredit ? (crVal ?? drVal ?? 0) : (drVal ?? crVal ?? 0);
+
+        if (amount <= 0 && !descVal) {
+          continue;
+        }
+
+        if (kind === 'INCOME') totalCredits += amount;
+        else totalDebits += amount;
+
+        rows.push({
+          srNo: srNoVal ?? rows.length + 1,
+          date: dateVal || new Date().toISOString().slice(0, 10),
+          kind,
+          amount,
+          description: descVal,
+          debit: drVal,
+          credit: crVal,
+          balance: balVal,
+          suggestedCategory: guessCategory(descVal, kind),
+        });
+      }
+
+      parsed = {
+        rows,
+        totalDebits: Math.round(totalDebits * 100) / 100,
+        totalCredits: Math.round(totalCredits * 100) / 100,
+        rowCount: rows.length,
+      };
     }
   }
 
-  return { 
-    approved: approvedCount, 
-    failed: failedCount, 
-    errors: entryIds && entryIds.length > 0 ? errors : [] 
+  // Annotate duplicates against existing entries in ledger
+  const annotated = await annotateDuplicates(parsed.rows);
+
+  return {
+    rows: annotated.rows,
+    totalDebits: parsed.totalDebits,
+    totalCredits: parsed.totalCredits,
+    rowCount: parsed.rowCount,
+    duplicateCount: annotated.duplicateCount,
+    newCount: annotated.newCount,
   };
 }
 
-/** Revert a single pending Excel entry */
-export async function revertPendingExcelEntry(id: string): Promise<boolean> {
-  try {
-    const entry = await prisma.entry.findUnique({ where: { id } });
-    if (!entry) throw Object.assign(new Error('Entry not found'), { statusCode: 404 });
+/** Save batch of approved entries directly into the ledger, safely filtering out duplicates */
+export async function saveBatchEntries(
+  entries: BatchEntryInput[],
+): Promise<{ count: number; skippedDuplicates: number }> {
+  if (!entries || entries.length === 0) {
+    return { count: 0, skippedDuplicates: 0 };
+  }
 
-    // Check if it's a pending Excel entry
-    const source = entry.source as string;
-    if (!source.includes('PENDING')) {
-      throw new Error('Entry is not in pending status');
-    }
+  // Query existing entries in date range to prevent duplicate insertion
+  const dates = entries.map((e) => e.date).filter(Boolean);
+  let existingEntries: Array<{
+    date: Date;
+    kind: string;
+    amount: number;
+    description: string | null;
+    note: string | null;
+    balance: number | null;
+  }> = [];
 
-    await prisma.entry.update({
-      where: { id },
-      data: {
-        description: null, // Remove Excel-specific fields
-        source: 'MANUAL' || undefined,
+  if (dates.length > 0) {
+    const sorted = [...dates].sort();
+    const minDate = new Date(`${sorted[0]}T00:00:00.000Z`);
+    minDate.setUTCDate(minDate.getUTCDate() - 1);
+    const maxDate = new Date(`${sorted[sorted.length - 1]}T23:59:59.999Z`);
+    maxDate.setUTCDate(maxDate.getUTCDate() + 1);
+
+    existingEntries = await prisma.entry.findMany({
+      where: {
+        date: {
+          gte: minDate,
+          lte: maxDate,
+        },
+      },
+      select: {
+        date: true,
+        kind: true,
+        amount: true,
+        description: true,
+        note: true,
+        balance: true,
       },
     });
-
-    return true;
-  } catch (err) {
-    console.error(`Failed to revert entry ${id}:`, err);
-    return false;
   }
-}
 
-/** Get all pending Excel entries for the approval dialog */
-export async function getPendingExcelEntries(): Promise<ImportEntry[]> {
-  const pending = await prisma.entry.findMany({
-    where: { source: 'PENDING_EXCEL' },
-    include: { category: true },
-    orderBy: { date: 'desc' },
+  const exactCounts = new Map<string, number>();
+  const noBalCounts = new Map<string, number>();
+
+  for (const e of existingEntries) {
+    const exactKey = buildEntryFingerprint(e, true);
+    exactCounts.set(exactKey, (exactCounts.get(exactKey) || 0) + 1);
+
+    if (e.balance === null || e.balance === undefined) {
+      const noBalKey = buildEntryFingerprint(e, false);
+      noBalCounts.set(noBalKey, (noBalCounts.get(noBalKey) || 0) + 1);
+    }
+  }
+
+  // Filter out any entries that already exist in database
+  const validNewEntries: BatchEntryInput[] = [];
+  let skippedDuplicates = 0;
+
+  for (const e of entries) {
+    const exactKey = buildEntryFingerprint(e, true);
+    const exactAvail = exactCounts.get(exactKey) || 0;
+    if (exactAvail > 0) {
+      skippedDuplicates++;
+      exactCounts.set(exactKey, exactAvail - 1);
+      continue;
+    }
+
+    if (e.balance !== null && e.balance !== undefined) {
+      const noBalKey = buildEntryFingerprint(e, false);
+      const noBalAvail = noBalCounts.get(noBalKey) || 0;
+      if (noBalAvail > 0) {
+        skippedDuplicates++;
+        noBalCounts.set(noBalKey, noBalAvail - 1);
+        continue;
+      }
+    }
+
+    validNewEntries.push(e);
+  }
+
+  if (validNewEntries.length === 0) {
+    return { count: 0, skippedDuplicates };
+  }
+
+  const categories = await prisma.category.findMany();
+  const categoryMap = new Map(categories.map((c) => [c.id, c]));
+
+  // Default fallback categories
+  const defaultExpense = categories.find((c) => c.kind === 'EXPENSE');
+  const defaultIncome = categories.find((c) => c.kind === 'INCOME');
+
+  const createData = validNewEntries.map((e) => {
+    let catId = e.categoryId;
+    const matched = categoryMap.get(catId);
+    if (!matched || matched.kind !== e.kind) {
+      catId = (e.kind === 'INCOME' ? defaultIncome?.id : defaultExpense?.id) ?? catId;
+    }
+
+    return {
+      date: parseDay(e.date),
+      kind: e.kind,
+      amount: e.amount,
+      categoryId: catId,
+      method: e.method || 'BANK',
+      note: e.note || '',
+      description: e.description || null,
+      debit: e.debit ?? (e.kind === 'EXPENSE' ? e.amount : null),
+      credit: e.credit ?? (e.kind === 'INCOME' ? e.amount : null),
+      balance: e.balance ?? null,
+      tagsJson: JSON.stringify(e.tags || ['excel-import']),
+      source: 'MANUAL',
+    };
   });
 
-  return pending.map((e) => ({
-    srNo: Number(e.id.slice(0, 8)), // Use ID prefix as sr.no for display
-    date: e.date ? e.date.toISOString().slice(0, 10) : null,
-    kind: e.kind,
-    categoryId: e.categoryId,
-    description: e.description,
-    debit: e.debit,
-    credit: e.credit,
-    balance: e.balance,
-    method: e.method || 'CASH',
-    note: e.note || '',
-    tags: JSON.parse(e.tagsJson || '[]'),
-    status: 'PENDING' as const,
-  }));
+  // Batch insert into database
+  const res = await prisma.entry.createMany({
+    data: createData,
+  });
+
+  return { count: res.count, skippedDuplicates };
 }
