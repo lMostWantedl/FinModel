@@ -58,11 +58,14 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
     lender: l.lender,
     outstanding: l.outstandingAmount,
     paid: l.amountPaid,
+    principalPaid: l.principalPaidSoFar,
     toBePaid: l.amountToBePaid,
     remainingInterest: l.remainingInterest,
-    percentPaid: l.percentPaid,
+    percentPaid: l.percentPaid || l.principalPercentPaid,
     rate: l.annualInterestRate,
     emi: l.emi,
+    statementPaid: l.statementPaid2026,
+    statementCount: l.statementTxnCount2026,
   }));
 
   // Pie chart datasets
@@ -99,9 +102,9 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
         </div>
 
         <div className="tile">
-          <div className="label">Amount Paid So Far</div>
+          <div className="label">Principal Repaid So Far</div>
           <div className="value" style={{ color: colorPaid }}>
-            {fmtMoney(summary.totalAmountPaid)}
+            {fmtMoney(summary.totalPrincipalPaid)}
           </div>
           <div className="sub">
             <span
@@ -115,9 +118,12 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
                 marginRight: 6,
               }}
             >
-              {summary.overallProgressPct}%
+              {summary.totalLoanAmount > 0
+                ? Math.round((summary.totalPrincipalPaid / summary.totalLoanAmount) * 1000) / 10
+                : 0}
+              %
             </span>
-            of total debt obligation
+            of {fmtMoney(summary.totalLoanAmount)} borrowed
           </div>
         </div>
 
@@ -138,14 +144,13 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
         </div>
 
         <div className="tile">
-          <div className="label">Weighted Avg Interest</div>
-          <div
-            className="value"
-            style={{ color: summary.weightedApr > 25 ? 'var(--critical)' : 'inherit' }}
-          >
-            {summary.weightedApr}%
+          <div className="label">2026 Statement Paid</div>
+          <div className="value" style={{ color: 'var(--accent)' }}>
+            {fmtMoney(summary.totalStatementPaid2026)}
           </div>
-          <div className="sub">annual percentage rate</div>
+          <div className="sub">
+            {summary.totalStatementTxnCount2026} verified debits in 2026
+          </div>
         </div>
       </div>
 
@@ -265,13 +270,23 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
                       <strong>{fmtMoney(d.outstanding)}</strong>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, marginBottom: 4 }}>
-                      <span style={{ color: colorPaid }}>Amount Paid So Far:</span>
-                      <strong>{fmtMoney(d.paid)}</strong>
+                      <span style={{ color: colorPaid }}>
+                        {d.paid > 0 ? 'Contract Repaid:' : d.principalPaid > 0 ? 'Principal Repaid:' : 'Amount Paid:'}
+                      </span>
+                      <strong>{fmtMoney(d.paid || d.principalPaid)}</strong>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, marginBottom: 4 }}>
-                      <span style={{ color: colorToBePaid }}>Amount To Be Paid:</span>
+                      <span style={{ color: colorToBePaid }}>Scheduled To Be Paid:</span>
                       <strong>{fmtMoney(d.toBePaid)}</strong>
                     </div>
+                    {d.statementPaid > 0 && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, marginBottom: 4 }}>
+                        <span style={{ color: 'var(--accent)' }}>2026 Statement Debits:</span>
+                        <strong style={{ color: 'var(--accent)' }}>
+                          {fmtMoney(d.statementPaid)} ({d.statementCount} debits)
+                        </strong>
+                      </div>
+                    )}
                     <div
                       style={{
                         marginTop: 8,
@@ -281,7 +296,7 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
                         justifyContent: 'space-between',
                       }}
                     >
-                      <span style={{ color: t.muted }}>Repayment Progress:</span>
+                      <span style={{ color: t.muted }}>Contract Progress:</span>
                       <strong style={{ color: colorPaid }}>{d.percentPaid}%</strong>
                     </div>
                   </div>
@@ -477,10 +492,30 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
 
       {/* 5. Detailed Per-Loan Visual Progress Cards */}
       <div>
-        <h2 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 12px' }}>Per-Loan Repayment Cards</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div>
+            <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>Per-Loan Repayment Cards (Loan Contract Data)</h2>
+            <p className="muted" style={{ margin: '3px 0 0', fontSize: 12.5 }}>
+              Calculated from official loan contract details: sanctioned amount, outstanding principal, and scheduled EMIs.
+            </p>
+          </div>
+        </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
           {loans.map((loan) => {
             const isSelected = selectedLoanId === loan.id;
+            const isMidway = loan.elapsedMonths > 0;
+            const isPrincipalReduced = loan.principalPaidSoFar > 0;
+            const progress = loan.percentPaid > 0 ? loan.percentPaid : loan.principalPercentPaid;
+
+            let badgeText = `${loan.remainingMonths} mos remaining`;
+            if (isMidway) {
+              badgeText = `${loan.elapsedMonths} of ${loan.tenureMonths} EMIs paid (${loan.percentPaid}%)`;
+            } else if (isPrincipalReduced) {
+              badgeText = `₹${compact(loan.principalPaidSoFar)} principal repaid (${loan.principalPercentPaid}%)`;
+            } else if (loan.tenureMonths > 0) {
+              badgeText = `Active · ${loan.remainingMonths} mos remaining`;
+            }
+
             return (
               <div
                 key={loan.id}
@@ -504,19 +539,20 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
                   <span
                     className="badge"
                     style={{
-                      background: loan.percentPaid >= 75 ? `${colorPaid}20` : 'var(--border)',
-                      color: loan.percentPaid >= 75 ? colorPaid : 'inherit',
-                      fontSize: 12,
+                      background: progress >= 50 ? `${colorPaid}20` : 'var(--border)',
+                      color: progress >= 50 ? colorPaid : 'inherit',
+                      fontSize: 11.5,
+                      fontWeight: 600,
                     }}
                   >
-                    {loan.percentPaid}% paid
+                    {badgeText}
                   </span>
                 </div>
 
                 {/* Progress bar */}
                 <div
                   style={{
-                    height: 8,
+                    height: 7,
                     background: 'var(--grid)',
                     borderRadius: 999,
                     overflow: 'hidden',
@@ -526,15 +562,15 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
                 >
                   <div
                     style={{
-                      width: `${loan.percentPaid}%`,
-                      background: colorPaid,
+                      width: `${Math.min(100, Math.max(0, progress))}%`,
+                      background: progress > 0 ? colorPaid : 'transparent',
                       borderRadius: 999,
                       transition: 'width 0.3s ease',
                     }}
                   />
                 </div>
 
-                {/* 3 Metrics: Outstanding, Paid, To Be Paid */}
+                {/* 3 Metrics: Outstanding, Repaid to date, To Be Paid */}
                 <div
                   style={{
                     display: 'grid',
@@ -551,11 +587,17 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
                     <div style={{ fontSize: 14, fontWeight: 600, color: colorOutstanding, marginTop: 2 }}>
                       {fmtMoney(loan.outstandingAmount)}
                     </div>
+                    <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>Principal balance</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 11, color: t.muted }}>Amount Paid</div>
+                    <div style={{ fontSize: 11, color: t.muted }}>
+                      {loan.contractualPaid > 0 ? 'Contract Repaid' : loan.principalPaidSoFar > 0 ? 'Principal Repaid' : 'Amount Paid'}
+                    </div>
                     <div style={{ fontSize: 14, fontWeight: 600, color: colorPaid, marginTop: 2 }}>
-                      {fmtMoney(loan.amountPaid)}
+                      {fmtMoney(loan.contractualPaid || loan.principalPaidSoFar)}
+                    </div>
+                    <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>
+                      {loan.elapsedMonths > 0 ? `${loan.elapsedMonths} EMIs completed` : loan.principalPaidSoFar > 0 ? `${loan.principalPercentPaid}% repaid` : '0 EMIs elapsed'}
                     </div>
                   </div>
                   <div>
@@ -563,23 +605,26 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
                     <div style={{ fontSize: 14, fontWeight: 600, color: colorToBePaid, marginTop: 2 }}>
                       {fmtMoney(loan.amountToBePaid)}
                     </div>
+                    <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>
+                      {loan.remainingMonths} EMIs left
+                    </div>
                   </div>
                 </div>
 
                 {/* Details list */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: t.inkSecondary }}>
                   <span>
-                    EMI: <strong>{fmtMoney(loan.emi)}</strong> (due on {loan.emiDay}th)
+                    EMI: <strong>{fmtMoney(loan.emi)}</strong> (due {loan.emiDay}th)
                   </span>
                   <span>
                     Rate: <strong>{loan.annualInterestRate}%</strong>
                   </span>
                   <span>
-                    Left: <strong>{loan.remainingMonths} mos</strong>
+                    Sanctioned: <strong>{fmtMoney(loan.loanAmount)}</strong>
                   </span>
                 </div>
 
-                {loan.ledgerPaid > 0 && (
+                {loan.statementPaid2026 > 0 && (
                   <div
                     style={{
                       marginTop: 8,
@@ -589,17 +634,139 @@ export function LoanCharts({ data }: { data: LoanAnalyticsResponse }) {
                       color: t.muted,
                       display: 'flex',
                       justifyContent: 'space-between',
+                      alignItems: 'center',
                     }}
                   >
-                    <span>Statement Verified:</span>
-                    <span>
-                      {loan.ledgerTxnCount} debits reconciled ({fmtMoney(loan.ledgerPaid)})
+                    <span>2026 Statements:</span>
+                    <span style={{ color: 'var(--accent)', fontWeight: 500 }}>
+                      {loan.statementTxnCount2026} debits reconciled ({fmtMoney(loan.statementPaid2026)})
                     </span>
                   </div>
                 )}
               </div>
             );
           })}
+        </div>
+      </div>
+
+      {/* 6. Dedicated Section: 2026 Bank Statement Reconciled Payments */}
+      <div className="card" style={{ margin: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <h2 style={{ margin: 0 }}>2026 Bank Statement Payments (Reconciled since Jan 1, 2026)</h2>
+              <span
+                className="badge"
+                style={{
+                  background: 'rgba(57, 135, 229, 0.15)',
+                  color: 'var(--accent)',
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                2026 Statements
+              </span>
+            </div>
+            <p className="muted" style={{ margin: '6px 0 0', fontSize: 13, lineHeight: 1.5 }}>
+              Bank statement records were imported starting from <strong>Jan 1, 2026</strong>. The figures below reflect verified automated debits (ACH / NACH / UPI e-mandates) during 2026. Because older loans originated before 2026, lifetime repayment progress and principal balances above are tracked from official loan contracts.
+            </p>
+          </div>
+        </div>
+
+        {/* Statement summary strip */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+            gap: 12,
+            background: 'var(--page)',
+            padding: '12px 16px',
+            borderRadius: 8,
+            marginBottom: 16,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 11.5, color: t.muted }}>Total 2026 Statement Repayments</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--accent)', marginTop: 2 }}>
+              {fmtMoney(summary.totalStatementPaid2026)}
+            </div>
+            <div style={{ fontSize: 11.5, color: t.muted }}>verified debits across all loans</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, color: t.muted }}>Reconciled Transactions</div>
+            <div style={{ fontSize: 18, fontWeight: 700, marginTop: 2 }}>
+              {summary.totalStatementTxnCount2026} debits
+            </div>
+            <div style={{ fontSize: 11.5, color: t.muted }}>automated e-mandates matched</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, color: t.muted }}>Statement Date Range</div>
+            <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
+              {summary.statementStartDate ?? '2026-01-01'} to {summary.statementEndDate ?? 'Present'}
+            </div>
+            <div style={{ fontSize: 11.5, color: t.muted }}>active verification window</div>
+          </div>
+        </div>
+
+        {/* Table of per-loan 2026 debits */}
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th>Loan &amp; Lender</th>
+                <th className="num">Scheduled EMI</th>
+                <th className="num">2026 Debits Verified</th>
+                <th className="num">2026 Reconciled Total</th>
+                <th className="num">Est. Months in 2026</th>
+                <th>Latest Debit Verified</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loans.map((l) => {
+                const estMonths = l.emi > 0 ? Math.round((l.statementPaid2026 / l.emi) * 10) / 10 : 0;
+                return (
+                  <tr key={`stmt-${l.id}`}>
+                    <td>
+                      <strong>{l.name}</strong>
+                      <div style={{ fontSize: 11.5, color: t.muted }}>{l.lender}</div>
+                    </td>
+                    <td className="num">{fmtMoney(l.emi)}</td>
+                    <td className="num">
+                      <strong>{l.statementTxnCount2026}</strong> debits
+                    </td>
+                    <td className="num" style={{ color: colorPaid, fontWeight: 600 }}>
+                      {fmtMoney(l.statementPaid2026)}
+                    </td>
+                    <td className="num">
+                      {estMonths > 0 ? `~${estMonths} mos` : '—'}
+                    </td>
+                    <td style={{ color: t.inkSecondary, fontSize: 12 }}>
+                      {l.lastPaymentDate ?? '—'}
+                    </td>
+                    <td>
+                      {l.statementTxnCount2026 > 0 ? (
+                        <span
+                          className="badge"
+                          style={{
+                            background: 'rgba(25, 158, 112, 0.15)',
+                            color: colorPaid,
+                            fontSize: 11.5,
+                          }}
+                        >
+                          ✓ Verified in 2026
+                        </span>
+                      ) : (
+                        <span className="badge" style={{ fontSize: 11.5 }}>
+                          Pending statement import
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

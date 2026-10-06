@@ -39,16 +39,9 @@ export function parsedToDbData(parsed: ParsedLoan) {
   };
 }
 
-function getMonthDifference(start: Date, end: Date): number {
-  return (
-    (end.getFullYear() - start.getFullYear()) * 12 +
-    (end.getMonth() - start.getMonth())
-  );
-}
-
 /** Rehydrate the domain Loan from its DB row. */
-export async function rowToDomain(row: LoanRow): Promise<DomainLoan> {
-  const body = {
+export function rowToDomain(row: LoanRow): DomainLoan {
+  return loanFromJson({
     id: row.id,
     lender: row.lender,
     name: row.name,
@@ -63,7 +56,7 @@ export async function rowToDomain(row: LoanRow): Promise<DomainLoan> {
     emi: row.emi,
     emiDay: row.emiDay,
     tenureMonths: row.tenureMonths,
-    remainingMonths: getMonthDifference(row.startDate, new Date()) || row.remainingMonths,
+    remainingMonths: row.remainingMonths,
     startDate: row.startDate.toISOString(),
     endDate: row.endDate.toISOString(),
     processingFee: row.processingFee,
@@ -71,17 +64,8 @@ export async function rowToDomain(row: LoanRow): Promise<DomainLoan> {
     totalRepayment: row.totalRepayment,
     foreclosure: JSON.parse(row.foreclosureJson),
     partPayment: JSON.parse(row.partPaymentJson),
-  }
-  if (getMonthDifference(row.startDate, new Date()) !== row.remainingMonths) {
-    const { id } = row;
-    const parseBody = loanJsonSchema.parse(body);
-    const loan = await prisma.loan
-      .update({ where: { id }, data: parsedToDbData(parseBody) })
-      .catch(() => {
-        console.error(`Failed to update loan ${id} with recalculated remainingMonths`);
-      });
-  }
-  return loanFromJson(body);
+  });
 }
 
-export const rowToJson = async (row: LoanRow): Promise<LoanJson> => loanToJson(await rowToDomain(row));
+export const rowToJson = (row: LoanRow): LoanJson => loanToJson(rowToDomain(row));
+

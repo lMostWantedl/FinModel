@@ -258,9 +258,10 @@ export function LoansPage() {
                     <th>Type</th>
                     <th className="num">Priority</th>
                     <th className="num">Outstanding</th>
-                    <th className="num">Paid to date</th>
+                    <th className="num">Repaid (Contract)</th>
                     <th className="num">To be paid</th>
                     <th className="num">Progress</th>
+                    <th className="num">2026 Stmt Paid</th>
                     <th className="num">Rate %</th>
                     <th className="num">APR %</th>
                     <th className="num">EMI</th>
@@ -286,7 +287,7 @@ export function LoansPage() {
                           {fmtMoney(l.outstandingAmount)}
                         </td>
                         <td className="num" style={{ color: 'var(--good)', fontWeight: 600 }}>
-                          {aItem ? fmtMoney(aItem.amountPaid) : '—'}
+                          {aItem ? fmtMoney(aItem.contractualPaid || aItem.principalPaidSoFar) : '—'}
                         </td>
                         <td className="num" style={{ color: '#c98500', fontWeight: 600 }}>
                           {aItem ? fmtMoney(aItem.amountToBePaid) : '—'}
@@ -296,12 +297,24 @@ export function LoansPage() {
                             <span
                               className="badge"
                               style={{
-                                background: aItem.percentPaid >= 75 ? 'rgba(25, 158, 112, 0.15)' : 'var(--border)',
-                                color: aItem.percentPaid >= 75 ? 'var(--good)' : 'inherit',
+                                background: (aItem.percentPaid || aItem.principalPercentPaid) >= 50 ? 'rgba(25, 158, 112, 0.15)' : 'var(--border)',
+                                color: (aItem.percentPaid || aItem.principalPercentPaid) >= 50 ? 'var(--good)' : 'inherit',
                                 fontSize: 11.5,
                               }}
                             >
-                              {aItem.percentPaid}%
+                              {aItem.percentPaid || aItem.principalPercentPaid}%
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td className="num" style={{ color: 'var(--accent)', fontSize: 12 }}>
+                          {aItem && aItem.statementPaid2026 > 0 ? (
+                            <span>
+                              {fmtMoney(aItem.statementPaid2026)}{' '}
+                              <span className="muted" style={{ fontSize: 11 }}>
+                                ({aItem.statementTxnCount2026})
+                              </span>
                             </span>
                           ) : (
                             '—'

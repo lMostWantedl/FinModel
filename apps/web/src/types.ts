@@ -237,7 +237,10 @@ export interface LoanAnalyticsItem {
   loanAmount: number;
   disbursedAmount: number;
   outstandingAmount: number;
+  principalPaidSoFar: number;
+  principalPercentPaid: number;
   amountPaid: number;
+  contractualPaid: number;
   amountToBePaid: number;
   emi: number;
   emiDay: number;
@@ -250,17 +253,19 @@ export interface LoanAnalyticsItem {
   totalInterest: number;
   remainingInterest: number;
   interestPaidSoFar: number;
-  principalPaidSoFar: number;
   percentPaid: number;
+  statementPaid2026: number;
+  statementTxnCount2026: number;
+  lastPaymentDate: string | null;
   ledgerPaid: number;
   ledgerTxnCount: number;
-  lastPaymentDate: string | null;
 }
 
 export interface LoanAnalyticsResponse {
   summary: {
     totalLoanAmount: number;
     totalOutstanding: number;
+    totalPrincipalPaid: number;
     totalAmountPaid: number;
     totalAmountToBePaid: number;
     totalMonthlyEmi: number;
@@ -269,6 +274,10 @@ export interface LoanAnalyticsResponse {
     weightedApr: number;
     overallProgressPct: number;
     loanCount: number;
+    totalStatementPaid2026: number;
+    totalStatementTxnCount2026: number;
+    statementStartDate: string | null;
+    statementEndDate: string | null;
   };
   loans: LoanAnalyticsItem[];
 }
