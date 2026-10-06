@@ -185,6 +185,27 @@ export function LedgerPage() {
     }
   };
 
+  const reconcileEmis = async () => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.reconcileEmis();
+      if (res.reconciledCount > 0) {
+        setNotice(
+          `✓ Reconciled ${res.reconciledCount} EMI payment(s) from your bank transactions (${res.reconciled.map((r) => r.loanName).join(', ')})!`,
+        );
+      } else {
+        setNotice('All bank transactions in your ledger are already reconciled with your loans.');
+      }
+      await Promise.all([loadEntries(), loadEmiDue()]);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const remove = async (id: string) => {
     if (editing?.id === id) cancelEdit();
     try {
@@ -320,27 +341,49 @@ export function LedgerPage() {
           <button className="primary" disabled={busy} onClick={() => void syncAuto()}>
             ⟳ Sync EMIs &amp; subscriptions
           </button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy}
+            onClick={() => void reconcileEmis()}
+            title="Scan bank transactions in your ledger and automatically link them to loan EMIs"
+          >
+            ⚡ Auto-Reconcile EMIs
+          </button>
         </div>
         <p className="muted">
           Sync adds one expense per loan EMI and per subscription charge for each billing period,
           but only from the date above onward — periods before it are left exactly as they are,
           including ones you deleted. Edited entries are never overwritten.
         </p>
-        {emiDue && emiDue.pendingCount > 0 && (
+        {emiDue && emiDue.pendingCount > 0 ? (
           <div
             style={{
-              border: '1px solid var(--border)',
+              border: '1px solid rgba(210, 153, 34, 0.4)',
               borderRadius: 8,
               padding: 12,
               marginBottom: 12,
+              background: 'rgba(210, 153, 34, 0.05)',
             }}
           >
-            <strong>EMIs due this month — {emiDue.pendingCount} pending</strong>
-            <p className="muted" style={{ marginTop: 4 }}>
-              Paid one early? Log it here (not the form above) so the sync links it to the loan and
-              never adds a duplicate.
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 8 }}>
+              <strong style={{ color: '#e3b341' }}>
+                EMIs due this month — {emiDue.pendingCount} pending ({fmtMoney(emiDue.pendingAmount)})
+              </strong>
+              <button
+                type="button"
+                className="secondary"
+                style={{ padding: '3px 10px', fontSize: 12 }}
+                disabled={busy}
+                onClick={() => void reconcileEmis()}
+              >
+                ⚡ Auto-Detect from Bank Statements
+              </button>
+            </div>
+            <p className="muted" style={{ marginTop: 2, fontSize: 12 }}>
+              Paid through bank or statement upload? Click <strong>Auto-Detect</strong> to automatically reconcile matching transactions and clear them.
             </p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
               {emiDue.pending.map((p) => (
                 <div key={p.loanId} style={{ display: 'flex', alignItems: 'end', gap: 10, flexWrap: 'wrap' }}>
                   <span style={{ minWidth: 160 }}>
@@ -364,7 +407,43 @@ export function LedgerPage() {
               ))}
             </div>
           </div>
-        )}
+        ) : emiDue && emiDue.dueCount > 0 ? (
+          <div
+            style={{
+              border: '1px solid rgba(46, 160, 67, 0.4)',
+              borderRadius: 8,
+              padding: '12px 16px',
+              marginBottom: 12,
+              background: 'rgba(46, 160, 67, 0.1)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: 8,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ color: 'var(--good, #3fb950)', fontSize: 20 }}>✓</span>
+              <div>
+                <strong style={{ color: 'var(--good, #3fb950)' }}>
+                  All {emiDue.dueCount} EMIs for {emiDue.month} are paid! ({fmtMoney(emiDue.dueTotal)})
+                </strong>
+                <div style={{ fontSize: 12, color: 'var(--muted, #8b949e)', marginTop: 2 }}>
+                  All loan obligations for this month have been verified and recorded in your ledger.
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="ghost"
+              style={{ fontSize: 12, color: 'var(--muted, #8b949e)' }}
+              disabled={busy}
+              onClick={() => void reconcileEmis()}
+            >
+              ⟳ Re-check
+            </button>
+          </div>
+        ) : null}
         <div className="grid" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
           <label className="field">
             From

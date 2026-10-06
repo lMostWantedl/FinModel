@@ -265,6 +265,137 @@ export async function logEmiPayment(
   };
 }
 
+/**
+ * Auto-detect and reconcile unlinked ledger entries that correspond to loan EMI payments.
+ * Links entry.loanId, entry.periodKey, sets category to 'EMI', and adds 'emi' tag.
+ */
+export async function reconcileLoanEmis(): Promise<{
+  reconciledCount: number;
+  reconciled: Array<{
+    entryId: string;
+    loanId: string;
+    loanName: string;
+    amount: number;
+    date: string;
+    description: string;
+  }>;
+}> {
+  const loans = await prisma.loan.findMany();
+  if (loans.length === 0) {
+    return { reconciledCount: 0, reconciled: [] };
+  }
+
+  const emiCategory = await prisma.category.findUnique({
+    where: { name_kind: { name: 'EMI', kind: 'EXPENSE' } },
+  });
+  if (!emiCategory) return { reconciledCount: 0, reconciled: [] };
+
+  // Find all unlinked expense entries
+  const unlinkedEntries = await prisma.entry.findMany({
+    where: {
+      kind: 'EXPENSE',
+      loanId: null,
+    },
+    include: { category: true },
+    orderBy: { date: 'desc' },
+  });
+
+  // Find already logged loanId+periodKey pairs so we don't double link a month
+  const alreadyLogged = await prisma.entry.findMany({
+    where: { loanId: { not: null }, periodKey: { not: null } },
+    select: { loanId: true, periodKey: true },
+  });
+  const loggedPairs = new Set(alreadyLogged.map((e) => `${e.loanId}:${e.periodKey}`));
+
+  const reconciled: Array<{
+    entryId: string;
+    loanId: string;
+    loanName: string;
+    amount: number;
+    date: string;
+    description: string;
+  }> = [];
+
+  for (const loan of loans) {
+    // Generate keyword aliases for this loan
+    const nameWords = loan.name.toLowerCase().split(/\s+/).filter((w) => w.length >= 3);
+    const lenderWords = (loan.lender || '').toLowerCase().split(/\s+/).filter((w) => w.length >= 3);
+    const aliases: string[] = [];
+    const loanNameLower = loan.name.toLowerCase();
+    const lenderLower = (loan.lender || '').toLowerCase();
+
+    if (loanNameLower.includes('ring') || lenderLower.includes('northern')) aliases.push('nort', 'ring');
+    if (loanNameLower.includes('kredit') || lenderLower.includes('kredit') || lenderLower.includes('krazy')) {
+      aliases.push('kbma', 'krazy', 'kredit');
+    }
+    if (loanNameLower.includes('moneyview') || lenderLower.includes('smfg')) {
+      aliases.push('smfg', 'moneyview');
+    }
+    if (loanNameLower.includes('yes') || lenderLower.includes('yes')) {
+      aliases.push('yes', 'pln');
+    }
+    if (loanNameLower.includes('true') || lenderLower.includes('true')) {
+      aliases.push('true');
+    }
+    if (loanNameLower.includes('navi') || lenderLower.includes('navi')) {
+      aliases.push('navi', 'finserv');
+    }
+
+    const keywords = [...new Set([...nameWords, ...lenderWords, ...aliases])];
+
+    for (const entry of unlinkedEntries) {
+      // Amount must match loan EMI (within 1 for rounding)
+      if (Math.abs(entry.amount - loan.emi) > 1) continue;
+
+      const pKey = monthKey(entry.date);
+      if (loggedPairs.has(`${loan.id}:${pKey}`)) continue;
+
+      const narration = `${entry.note || ''} ${entry.description || ''}`.toLowerCase();
+      const hasKeyword = keywords.some((k) => narration.includes(k));
+
+      // Either keyword match, or date is within 7 days of loan.emiDay for that month
+      const entryDay = entry.date.getUTCDate();
+      const emiDay = loan.emiDay || loan.startDate.getUTCDate();
+      const dayDiff = Math.abs(entryDay - emiDay);
+      const isDateClose = dayDiff <= 7;
+
+      if (!hasKeyword && !isDateClose) continue;
+
+      // We have a verified match!
+      let tags: string[] = [];
+      try {
+        tags = JSON.parse(entry.tagsJson || '[]');
+      } catch {
+        tags = [];
+      }
+      if (!tags.includes('emi')) tags.push('emi');
+
+      await prisma.entry.update({
+        where: { id: entry.id },
+        data: {
+          categoryId: emiCategory.id,
+          loanId: loan.id,
+          periodKey: pKey,
+          note: entry.note || `${loan.name} EMI`,
+          tagsJson: JSON.stringify(tags),
+        },
+      });
+
+      loggedPairs.add(`${loan.id}:${pKey}`);
+      reconciled.push({
+        entryId: entry.id,
+        loanId: loan.id,
+        loanName: loan.name,
+        amount: entry.amount,
+        date: dateKey(entry.date),
+        description: entry.description || entry.note || '',
+      });
+    }
+  }
+
+  return { reconciledCount: reconciled.length, reconciled };
+}
+
 export async function listEntries(opts: {
   from: Date;
   to: Date;

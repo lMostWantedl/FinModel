@@ -7,6 +7,7 @@ import {
   listEntries,
   logEmiPayment,
   parseDay,
+  reconcileLoanEmis,
   syncAutoEntries,
 } from '../services/ledgerService.js';
 
@@ -32,6 +33,11 @@ export const entryRoutes: FastifyPluginAsync = async (app) => {
 
   /** This month's EMIs and which are still unpaid (no ledger row yet). */
   app.get('/emi-due', async () => emiDueThisMonth());
+
+  /** Automatically detect and reconcile unlinked ledger entries with loan EMIs. */
+  app.post('/entries/reconcile-emis', async () => {
+    return reconcileLoanEmis();
+  });
 
   /** Log an EMI payment linked to a loan + this month, so sync won't duplicate
    * it. Use for EMIs paid early (before the due date / before auto-sync). */
@@ -99,6 +105,7 @@ export const entryRoutes: FastifyPluginAsync = async (app) => {
   const syncHandler = async (req: { body?: unknown }) => {
     const body = (req.body ?? {}) as { from?: string };
     const from = body.from && /^\d{4}-\d{2}-\d{2}$/.test(body.from) ? parseDay(body.from) : undefined;
+    await reconcileLoanEmis();
     return syncAutoEntries(from);
   };
   app.post('/entries/sync-auto', syncHandler);

@@ -78,6 +78,18 @@ export const api = {
     }>,
   ) => request<LedgerEntry>(`/entries/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   emiDue: () => request<EmiDue>('/emi-due'),
+  reconcileEmis: () =>
+    request<{
+      reconciledCount: number;
+      reconciled: Array<{
+        entryId: string;
+        loanId: string;
+        loanName: string;
+        amount: number;
+        date: string;
+        description: string;
+      }>;
+    }>('/entries/reconcile-emis', { method: 'POST' }),
   payEmi: (body: { loanId: string; date?: string; amount?: number; method?: PaymentMethod; note?: string }) =>
     request<LedgerEntry>('/entries/pay-emi', { method: 'POST', body: JSON.stringify(body) }),
   syncAuto: (from?: string) =>

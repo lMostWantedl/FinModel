@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
 import { prisma } from '../lib/prisma.js';
-import { parseDay } from './ledgerService.js';
+import { parseDay, reconcileLoanEmis } from './ledgerService.js';
 
 export interface ParsedStatementRow {
   srNo: number;
@@ -103,6 +103,26 @@ function guessCategory(desc: string, kind: 'INCOME' | 'EXPENSE'): string {
     if (s.includes('reimburse')) return 'Reimbursement';
     return 'Other income';
   } else {
+    // 1. EMI & Loan checks first so payments via UPI handles like @mairtel aren't misclassified as utility bills
+    if (
+      s.includes('ach dr inw') ||
+      s.includes('nach') ||
+      s.includes('finserv') ||
+      s.includes('kbma') ||
+      s.includes('kredit') ||
+      s.includes('moneyview') ||
+      s.includes('smfg') ||
+      s.includes('northern arc') ||
+      s.includes('/nort/') ||
+      s.includes('/true/') ||
+      s.includes('true balance') ||
+      s.includes('pln') ||
+      s.includes('emi') ||
+      s.includes('loan')
+    ) {
+      return 'EMI';
+    }
+
     if (s.includes('swiggy') || s.includes('zomato') || s.includes('mcdonald') || s.includes('restaurant') || s.includes('starbucks'))
       return 'Food & dining';
     if (s.includes('grocery') || s.includes('supermarket') || s.includes('bigbasket') || s.includes('dmart') || s.includes('blinkit') || s.includes('zepto') || s.includes('instamart'))
@@ -118,7 +138,6 @@ function guessCategory(desc: string, kind: 'INCOME' | 'EXPENSE'): string {
     if (s.includes('amazon') || s.includes('flipkart') || s.includes('myntra') || s.includes('zara') || s.includes('shopping'))
       return 'Shopping';
     if (s.includes('rent')) return 'Rent';
-    if (s.includes('emi') || s.includes('loan')) return 'EMI';
     if (s.includes('lend')) return 'Lend';
     return 'Other';
   }
@@ -690,6 +709,9 @@ export async function saveBatchEntries(
   const res = await prisma.entry.createMany({
     data: createData,
   });
+
+  // Automatically reconcile newly imported entries with loan EMIs in real time
+  await reconcileLoanEmis();
 
   return { count: res.count, skippedDuplicates };
 }
