@@ -106,7 +106,7 @@ export function SummaryPage() {
           <p className="muted">No expenses in this range.</p>
         ) : (
           <>
-            <CategoryChart data={expenseCategories.map((c) => ({ name: c.name, amount: c.amount }))} />
+            <CategoryChart data={expenseCategories} />
             <table>
               <thead>
                 <tr>

@@ -8,6 +8,7 @@ import { dashboardRoutes } from './routes/dashboard.js';
 import { exportRoutes } from './routes/export.js';
 import { categoryRoutes } from './routes/categories.js';
 import { entryRoutes } from './routes/entries.js';
+import { entriesBatchRoutes } from './routes/entriesBatch.js';
 import { subscriptionRoutes } from './routes/subscriptions.js';
 import { summaryRoutes } from './routes/summary.js';
 import { seedPresetCategories } from './services/ledgerService.js';
@@ -46,6 +47,7 @@ export async function buildApp() {
   await app.register(exportRoutes);
   await app.register(categoryRoutes);
   await app.register(entryRoutes);
+  await app.register(entriesBatchRoutes);
   await app.register(subscriptionRoutes);
   await app.register(summaryRoutes);
 

@@ -92,6 +92,17 @@ export const api = {
     request<Subscription>(`/subscriptions/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteSubscription: (id: string) => request<void>(`/subscriptions/${id}`, { method: 'DELETE' }),
   deleteEntry: (id: string) => request<void>(`/entries/${id}`, { method: 'DELETE' }),
+  createEntries: async (entries: Array<Omit<LedgerEntry, 'id' | 'createdAt' | 'source'>>) => {
+    const res = await fetch(`${API_BASE}/entries`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entries),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.message ?? `Failed to create entries: ${res.status}`);
+    }
+  },
   uploadAttachment: async (entryId: string, file: File): Promise<AttachmentMeta> => {
     const form = new FormData();
     form.append('file', file);
@@ -115,6 +126,34 @@ export const api = {
     opportunityRatePct: number;
   }) => request<SimulationPayload>('/simulate', { method: 'POST', body: JSON.stringify(body) }),
   excelUrl: `${API_BASE}/export/excel`,
+  batchCategories: () => request<{ id: string; name: string; kind: 'INCOME' | 'EXPENSE' }[]>('/entries/batch/categories'),
+  uploadBatchPreview: (file: File, categoryId: string) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('categoryId', categoryId);
+    // Upload to main batch endpoint which returns parsed data directly
+    return request<{ 
+      success: number; 
+      entries?: Array<{ 
+        id: string; 
+        srNo: number; 
+        date: string | null; 
+        kind: 'INCOME' | 'EXPENSE'; 
+        categoryId: string; 
+        description: string | null; 
+        debit: number | null; 
+        credit: number | null; 
+        method: string; 
+        note: string;
+        status: 'PENDING' | 'APPROVED'
+      }>;
+      message?: string;
+    }>('/entries/batch/upload', { method: 'POST', body: formData });
+  },
+  approvePendingEntries: (entryIds: string[]) =>
+    request<{ status: 'success'; approved: number; failed: number; errors?: string[]; message?: string }>(`/entries/batch/approve?entryIds=${entryIds.join(',')}`),
+  getPendingEntries: () => request<LedgerEntry[]>('/entries/batch/list'),
+  deletePendingEntry: (id: string) => request<void>(`/entries/batch/${id}`, { method: 'DELETE' }),
 };
 
 export const fmt = new Intl.NumberFormat('en-SG', { maximumFractionDigits: 0 });

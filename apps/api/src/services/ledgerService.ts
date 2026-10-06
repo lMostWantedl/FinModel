@@ -36,6 +36,8 @@ const PRESET_CATEGORIES: { name: string; kind: EntryKind }[] = [
   { name: 'Subscriptions', kind: 'EXPENSE' },
   { name: 'Fees & charges', kind: 'EXPENSE' },
   { name: 'Other', kind: 'EXPENSE' },
+  { name: 'Reimbursement', kind: 'INCOME' },
+  { name: 'Lend', kind: 'EXPENSE' },
 ];
 
 export async function seedPresetCategories(): Promise<void> {
@@ -49,6 +51,20 @@ export async function seedPresetCategories(): Promise<void> {
 }
 
 export const dateKey = (d: Date): string => d.toISOString().slice(0, 10);
+
+/** Get all categories for the Excel import dialog */
+export async function getAllCategories(): Promise<{ id: string; name: string; kind: 'INCOME' | 'EXPENSE' }[]> {
+  const categories = await prisma.category.findMany({
+    select: { id: true, name: true, kind: true },
+    orderBy: [{ kind: 'asc' }, { name: 'asc' }],
+  });
+  
+  // Add type based on kind
+  return categories.map((c) => ({
+    ...c,
+    type: c.kind, // INCOME or EXPENSE
+  }));
+}
 export const monthKey = (d: Date): string => d.toISOString().slice(0, 7);
 export const parseDay = (s: string): Date => new Date(`${s}T00:00:00.000Z`);
 

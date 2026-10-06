@@ -108,8 +108,9 @@ export interface LedgerEntry {
   categoryName: string;
   method: string;
   note: string;
+  description: string | null;
   tags: string[];
-  source: 'MANUAL' | 'EMI_AUTO' | 'SUB_AUTO';
+  source: 'MANUAL' | 'EMI_AUTO' | 'SUB_AUTO' | 'PENDING_EXCEL';
   loanId: string | null;
   attachments: AttachmentMeta[];
 }

@@ -111,6 +111,10 @@ model Entry {
   category    Category     @relation(fields: [categoryId], references: [id])
   method      String       @default("CASH") // CASH | BANK | UPI | CREDIT_CARD | OTHER
   note        String       @default("")
+  description String? // Sr.no: descriptive text for the entry
+  debit       Float? // Debit amount (for entries that reduce balance)
+  credit      Float? // Credit amount (for entries that increase balance)
+  balance     Float? // Running balance after this entry
   tagsJson    String       @default("[]")
   source         String        @default("MANUAL") // MANUAL | EMI_AUTO | SUB_AUTO
   loanId         String?

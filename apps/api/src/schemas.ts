@@ -94,7 +94,24 @@ export const entryBodySchema = z.object({
   categoryId: z.string().min(1),
   method: z.enum(['CASH', 'BANK', 'UPI', 'CREDIT_CARD', 'OTHER']).default('CASH'),
   note: z.string().max(500).default(''),
+  description: z.string().max(200).nullish(), // Sr.no descriptive text
   tags: z.array(z.string().min(1).max(40)).max(10).default([]),
+});
+
+/** Batch entry schema for Excel import with approval workflow */
+export const batchEntrySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  kind: z.enum(['INCOME', 'EXPENSE']).optional(),
+  amount: z.coerce.number().positive().nullish(), // Optional when debit/credit provided
+  categoryId: z.string().min(1),
+  method: z.enum(['CASH', 'BANK', 'UPI', 'CREDIT_CARD', 'OTHER']).default('CASH').optional(),
+  note: z.string().max(500).nullish(),
+  description: z.string().max(200).nullish(),
+  debit: z.coerce.number().nonnegative().nullish(),
+  credit: z.coerce.number().nonnegative().nullish(),
+  balance: z.coerce.number().nullish(),
+  tags: z.array(z.string().min(1).max(40)).max(20).nullish(),
+  status: z.enum(['PENDING', 'APPROVED']).default('PENDING'),
 });
 
 export const subscriptionBodySchema = z

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { api, fmtMoney } from '../api';
 import { SubscriptionsCard } from '../components/SubscriptionsCard';
+import { ExcelUploadDialog } from '../components/ExcelUploadDialog';
 import type { Category, EmiDue, EntryKind, LedgerEntry, PaymentMethod } from '../types';
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -216,13 +217,17 @@ export function LedgerPage() {
   return (
     <>
       <div className="card" ref={formRef}>
-        <h2>{editing ? `Edit entry — ${editing.date} ${editing.categoryName}` : 'Log income / expense'}</h2>
-        {editing && editing.source !== 'MANUAL' && (
-          <p className="muted">
-            This is an auto-logged {editing.source === 'EMI_AUTO' ? 'EMI' : 'subscription'} entry.
-            Your edits stick; the next sync will not overwrite it.
-          </p>
-        )}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>{editing ? `Edit entry — ${editing.date} ${editing.categoryName}` : 'Log income / expense'}</h2>
+          {editing && editing.source !== 'MANUAL' && (
+            <p className="muted">
+              This is an auto-logged {editing.source === 'EMI_AUTO' ? 'EMI' : 'subscription'} entry.
+              Your edits stick; the next sync will not overwrite it.
+            </p>
+          )}
+        </div>
+        
+        <ExcelUploadDialog categories={categories} />
         <form className="grid" onSubmit={submit}>
           <label className="field">
             Date
