@@ -7,6 +7,7 @@ import type {
   Granularity,
   LedgerEntry,
   Loan,
+  LoanAnalyticsResponse,
   LoanDraft,
   PaymentMethod,
   SimulationPayload,
@@ -32,6 +33,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   loans: () => request<Loan[]>('/loans'),
+  loanAnalytics: () => request<LoanAnalyticsResponse>('/loans/analytics'),
   createLoan: (loan: LoanDraft) =>
     request<Loan>('/loans', { method: 'POST', body: JSON.stringify(loan) }),
   updateLoan: (id: string, loan: LoanDraft) =>

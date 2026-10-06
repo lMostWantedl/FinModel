@@ -2,11 +2,17 @@ import type { FastifyPluginAsync } from 'fastify';
 import { prisma } from '../lib/prisma.js';
 import { loanImportSchema, loanJsonSchema } from '../schemas.js';
 import { parsedToDbData, rowToJson } from '../services/loanMapper.js';
+import { getLoansAnalytics } from '../services/loanAnalyticsService.js';
 
 export const loanRoutes: FastifyPluginAsync = async (app) => {
   app.get('/loans', async () => {
     const rows = await prisma.loan.findMany({ orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }] });
     return Promise.all(rows.map((row) => rowToJson(row)));
+  });
+
+  /** Detailed breakdown: current outstanding, amount paid, and amount to be paid per loan. */
+  app.get('/loans/analytics', async () => {
+    return getLoansAnalytics();
   });
 
   app.post('/loans', async (req, reply) => {

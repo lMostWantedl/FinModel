@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, fmtMoney } from '../api';
-import type { Loan, LoanType } from '../types';
+import { LoanCharts } from '../components/LoanCharts';
+import type { Loan, LoanAnalyticsResponse, LoanType } from '../types';
 
 const EMPTY = {
   lender: '',
@@ -62,6 +63,8 @@ const EXAMPLE_JSON = `{
 
 export function LoansPage() {
   const [loans, setLoans] = useState<Loan[]>([]);
+  const [analytics, setAnalytics] = useState<LoanAnalyticsResponse | null>(null);
+  const [sectionView, setSectionView] = useState<'both' | 'charts' | 'table'>('both');
   const [form, setForm] = useState<FormState>(EMPTY);
   const [editing, setEditing] = useState<Loan | null>(null);
   const [importText, setImportText] = useState('');
@@ -71,7 +74,13 @@ export function LoansPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLDivElement>(null);
 
-  const refresh = () => api.loans().then(setLoans).catch((e: Error) => setError(e.message));
+  const refresh = () =>
+    Promise.all([api.loans(), api.loanAnalytics()])
+      .then(([l, a]) => {
+        setLoans(l);
+        setAnalytics(a);
+      })
+      .catch((e: Error) => setError(e.message));
   useEffect(() => {
     void refresh();
   }, []);
@@ -179,61 +188,150 @@ export function LoansPage() {
 
   return (
     <>
-      <div className="card">
-        <h2>Your loans</h2>
-        {loans.length === 0 ? (
-          <p className="muted">No loans yet — add one below or import JSON.</p>
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>Lender</th>
-                  <th>Name</th>
-                  <th>Type</th>
-                  <th className="num">Priority</th>
-                  <th className="num">Outstanding</th>
-                  <th className="num">Rate %</th>
-                  <th className="num">APR %</th>
-                  <th className="num">EMI</th>
-                  <th>EMI date</th>
-                  <th className="num">Months left</th>
-                  <th className="num">FC fee %</th>
-                  <th className="num">PP fee %</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {loans.map((l) => (
-                  <tr key={l.id}>
-                    <td>{l.lender || '—'}</td>
-                    <td>{l.name}</td>
-                    <td>{l.type.replace('_', ' ').toLowerCase()}</td>
-                    <td className="num">{l.priority}</td>
-                    <td className="num">{fmtMoney(l.outstandingAmount)}</td>
-                    <td className="num">{l.annualInterestRate}</td>
-                    <td className="num">{l.apr}</td>
-                    <td className="num">{fmtMoney(l.emi)}</td>
-                    <td>{ordinal(l.emiDay)} of month</td>
-                    <td className="num">{l.remainingMonths}</td>
-                    <td className="num">{l.foreclosure.feePct}</td>
-                    <td className="num">{l.partPayment.feePct}</td>
-                    <td className="num" style={{ whiteSpace: 'nowrap' }}>
-                      <button className="ghost" style={{ color: 'var(--accent)' }} onClick={() => startEdit(l)}>
-                        Edit
-                      </button>{' '}
-                      <button className="ghost" onClick={() => remove(l.id)}>
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {analytics && analytics.loans.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 20,
+            flexWrap: 'wrap',
+            gap: 12,
+          }}
+        >
+          <div>
+            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>Loan Portfolio & Repayment Analytics</h1>
+            <p className="muted" style={{ margin: '3px 0 0', fontSize: 13 }}>
+              Current outstanding balances, amounts paid to date, and future obligations across all lenders.
+            </p>
           </div>
-        )}
-        {notice && <p className="muted" style={{ color: 'var(--good)' }}>{notice}</p>}
-      </div>
+          <nav className="tabs">
+            <button
+              className={sectionView === 'both' ? 'active' : ''}
+              onClick={() => setSectionView('both')}
+            >
+              👁️ All Views
+            </button>
+            <button
+              className={sectionView === 'charts' ? 'active' : ''}
+              onClick={() => setSectionView('charts')}
+            >
+              📊 Charts Only
+            </button>
+            <button
+              className={sectionView === 'table' ? 'active' : ''}
+              onClick={() => setSectionView('table')}
+            >
+              📋 Manage Loans
+            </button>
+          </nav>
+        </div>
+      )}
+
+      {/* Analytics & Charts Section */}
+      {analytics && analytics.loans.length > 0 && (sectionView === 'both' || sectionView === 'charts') && (
+        <div style={{ marginBottom: 24 }}>
+          <LoanCharts data={analytics} />
+        </div>
+      )}
+
+      {/* Loans Table & Form Management */}
+      {(sectionView === 'both' || sectionView === 'table' || !analytics || analytics.loans.length === 0) && (
+        <div className="card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h2 style={{ margin: 0 }}>Your loans</h2>
+            {analytics && (
+              <span className="muted" style={{ fontSize: 12.5 }}>
+                {loans.length} active loan accounts
+              </span>
+            )}
+          </div>
+          {loans.length === 0 ? (
+            <p className="muted">No loans yet — add one below or import JSON.</p>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Lender</th>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th className="num">Priority</th>
+                    <th className="num">Outstanding</th>
+                    <th className="num">Paid to date</th>
+                    <th className="num">To be paid</th>
+                    <th className="num">Progress</th>
+                    <th className="num">Rate %</th>
+                    <th className="num">APR %</th>
+                    <th className="num">EMI</th>
+                    <th>EMI date</th>
+                    <th className="num">Months left</th>
+                    <th className="num">FC fee %</th>
+                    <th className="num">PP fee %</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {loans.map((l) => {
+                    const aItem = analytics?.loans.find((a) => a.id === l.id);
+                    return (
+                      <tr key={l.id}>
+                        <td>{l.lender || '—'}</td>
+                        <td>
+                          <strong>{l.name}</strong>
+                        </td>
+                        <td>{l.type.replace('_', ' ').toLowerCase()}</td>
+                        <td className="num">{l.priority}</td>
+                        <td className="num" style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                          {fmtMoney(l.outstandingAmount)}
+                        </td>
+                        <td className="num" style={{ color: 'var(--good)', fontWeight: 600 }}>
+                          {aItem ? fmtMoney(aItem.amountPaid) : '—'}
+                        </td>
+                        <td className="num" style={{ color: '#c98500', fontWeight: 600 }}>
+                          {aItem ? fmtMoney(aItem.amountToBePaid) : '—'}
+                        </td>
+                        <td className="num">
+                          {aItem ? (
+                            <span
+                              className="badge"
+                              style={{
+                                background: aItem.percentPaid >= 75 ? 'rgba(25, 158, 112, 0.15)' : 'var(--border)',
+                                color: aItem.percentPaid >= 75 ? 'var(--good)' : 'inherit',
+                                fontSize: 11.5,
+                              }}
+                            >
+                              {aItem.percentPaid}%
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td className="num">{l.annualInterestRate}</td>
+                        <td className="num">{l.apr}</td>
+                        <td className="num">{fmtMoney(l.emi)}</td>
+                        <td>{ordinal(l.emiDay)} of month</td>
+                        <td className="num">{l.remainingMonths}</td>
+                        <td className="num">{l.foreclosure.feePct}</td>
+                        <td className="num">{l.partPayment.feePct}</td>
+                        <td className="num" style={{ whiteSpace: 'nowrap' }}>
+                          <button className="ghost" style={{ color: 'var(--accent)' }} onClick={() => startEdit(l)}>
+                            Edit
+                          </button>{' '}
+                          <button className="ghost" onClick={() => remove(l.id)}>
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {notice && <p className="muted" style={{ color: 'var(--good)' }}>{notice}</p>}
+        </div>
+      )}
 
       <div className="card" ref={formRef}>
         <h2>{editing ? `Edit: ${editing.name}` : 'Add a loan'}</h2>

@@ -227,3 +227,49 @@ export interface SimulationPayload {
   result: SimulationResult;
   comparison: StrategyComparison[];
 }
+
+export interface LoanAnalyticsItem {
+  id: string;
+  name: string;
+  lender: string;
+  type: string;
+  priority: number;
+  loanAmount: number;
+  disbursedAmount: number;
+  outstandingAmount: number;
+  amountPaid: number;
+  amountToBePaid: number;
+  emi: number;
+  emiDay: number;
+  annualInterestRate: number;
+  apr: number;
+  tenureMonths: number;
+  remainingMonths: number;
+  elapsedMonths: number;
+  totalRepayment: number;
+  totalInterest: number;
+  remainingInterest: number;
+  interestPaidSoFar: number;
+  principalPaidSoFar: number;
+  percentPaid: number;
+  ledgerPaid: number;
+  ledgerTxnCount: number;
+  lastPaymentDate: string | null;
+}
+
+export interface LoanAnalyticsResponse {
+  summary: {
+    totalLoanAmount: number;
+    totalOutstanding: number;
+    totalAmountPaid: number;
+    totalAmountToBePaid: number;
+    totalMonthlyEmi: number;
+    totalOriginalInterest: number;
+    totalRemainingInterest: number;
+    weightedApr: number;
+    overallProgressPct: number;
+    loanCount: number;
+  };
+  loans: LoanAnalyticsItem[];
+}
+
