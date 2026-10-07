@@ -54,21 +54,42 @@ export function LoanCharts({ data, onRecalculate, recalculating }: LoanChartsPro
   });
 
   // Chart 1 dataset: Main comparison
-  const barChartData = sortedLoans.map((l) => ({
-    id: l.id,
-    name: l.name,
-    lender: l.lender,
-    outstanding: l.outstandingAmount,
-    paid: l.amountPaid,
-    principalPaid: l.principalPaidSoFar,
-    toBePaid: l.amountToBePaid,
-    remainingInterest: l.remainingInterest,
-    percentPaid: l.percentPaid || l.principalPercentPaid,
-    rate: l.annualInterestRate,
-    emi: l.emi,
-    statementPaid: l.statementPaid2026,
-    statementCount: l.statementTxnCount2026,
-  }));
+  const barChartData = sortedLoans.map((l) => {
+    let effectiveElapsed = l.elapsedMonths;
+    let effectiveRemaining = l.remainingMonths;
+    if (
+      l.statementTxnCount2026 > 0 &&
+      l.remainingMonths === l.statementTxnCount2026 &&
+      l.elapsedMonths === l.tenureMonths - l.statementTxnCount2026
+    ) {
+      effectiveElapsed = l.statementTxnCount2026;
+      effectiveRemaining = Math.max(0, l.tenureMonths - effectiveElapsed);
+    } else if (l.elapsedMonths === 0 && l.statementTxnCount2026 > 0) {
+      effectiveElapsed = l.statementTxnCount2026;
+      effectiveRemaining = l.tenureMonths > 0 ? Math.max(0, l.tenureMonths - effectiveElapsed) : l.remainingMonths;
+    } else if (l.tenureMonths > 0 && effectiveElapsed + effectiveRemaining !== l.tenureMonths) {
+      effectiveElapsed = Math.max(0, l.tenureMonths - effectiveRemaining);
+    }
+    const paid = effectiveElapsed > 0 ? Math.round(effectiveElapsed * l.emi * 100) / 100 : l.amountPaid;
+    const toBePaid = effectiveRemaining > 0 ? Math.round(effectiveRemaining * l.emi * 100) / 100 : l.amountToBePaid;
+    const progress = l.tenureMonths > 0 ? Math.round((effectiveElapsed / l.tenureMonths) * 1000) / 10 : l.percentPaid;
+
+    return {
+      id: l.id,
+      name: l.name,
+      lender: l.lender,
+      outstanding: l.outstandingAmount,
+      paid,
+      principalPaid: l.principalPaidSoFar,
+      toBePaid,
+      remainingInterest: l.remainingInterest,
+      percentPaid: progress,
+      rate: l.annualInterestRate,
+      emi: l.emi,
+      statementPaid: l.statementPaid2026,
+      statementCount: l.statementTxnCount2026,
+    };
+  });
 
   // Pie chart datasets
   const outstandingPieData = loans.map((l, idx) => ({
@@ -538,16 +559,28 @@ export function LoanCharts({ data, onRecalculate, recalculating }: LoanChartsPro
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
           {loans.map((loan) => {
             const isSelected = selectedLoanId === loan.id;
-            const effectiveElapsed = Math.max(loan.elapsedMonths, loan.statementTxnCount2026);
-            const effectiveRemaining = loan.tenureMonths > 0 ? Math.max(0, loan.tenureMonths - effectiveElapsed) : loan.remainingMonths;
+            let effectiveElapsed = loan.elapsedMonths;
+            let effectiveRemaining = loan.remainingMonths;
+            if (
+              loan.statementTxnCount2026 > 0 &&
+              loan.remainingMonths === loan.statementTxnCount2026 &&
+              loan.elapsedMonths === loan.tenureMonths - loan.statementTxnCount2026
+            ) {
+              effectiveElapsed = loan.statementTxnCount2026;
+              effectiveRemaining = Math.max(0, loan.tenureMonths - effectiveElapsed);
+            } else if (loan.elapsedMonths === 0 && loan.statementTxnCount2026 > 0) {
+              effectiveElapsed = loan.statementTxnCount2026;
+              effectiveRemaining = loan.tenureMonths > 0 ? Math.max(0, loan.tenureMonths - effectiveElapsed) : loan.remainingMonths;
+            } else if (loan.tenureMonths > 0 && effectiveElapsed + effectiveRemaining !== loan.tenureMonths) {
+              effectiveElapsed = Math.max(0, loan.tenureMonths - effectiveRemaining);
+            }
+
             const isMidway = effectiveElapsed > 0;
             const isPrincipalReduced = loan.principalPaidSoFar > 0;
             const progress =
-              loan.percentPaid > 0
-                ? loan.percentPaid
-                : effectiveElapsed > 0 && loan.tenureMonths > 0
-                  ? Math.round((effectiveElapsed / loan.tenureMonths) * 1000) / 10
-                  : loan.principalPercentPaid;
+              loan.tenureMonths > 0
+                ? Math.round((effectiveElapsed / loan.tenureMonths) * 1000) / 10
+                : loan.percentPaid || loan.principalPercentPaid;
 
             let badgeText = `${effectiveRemaining} mos remaining`;
             if (isMidway && loan.tenureMonths > 0) {
@@ -557,6 +590,9 @@ export function LoanCharts({ data, onRecalculate, recalculating }: LoanChartsPro
             } else if (loan.tenureMonths > 0) {
               badgeText = `Active · ${effectiveRemaining} mos remaining`;
             }
+
+            const displayPaid = effectiveElapsed > 0 ? Math.round(effectiveElapsed * loan.emi * 100) / 100 : loan.contractualPaid || loan.principalPaidSoFar;
+            const displayToBePaid = effectiveRemaining > 0 ? Math.round(effectiveRemaining * loan.emi * 100) / 100 : loan.amountToBePaid;
 
             return (
               <div
@@ -632,24 +668,18 @@ export function LoanCharts({ data, onRecalculate, recalculating }: LoanChartsPro
                     <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>Principal balance</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 11, color: t.muted }}>
-                      {loan.contractualPaid > 0 ? 'Contract Repaid' : loan.principalPaidSoFar > 0 ? 'Principal Repaid' : 'Amount Paid'}
-                    </div>
+                    <div style={{ fontSize: 11, color: t.muted }}>Contract Repaid</div>
                     <div style={{ fontSize: 14, fontWeight: 600, color: colorPaid, marginTop: 2 }}>
-                      {fmtMoney(loan.contractualPaid || (effectiveElapsed * loan.emi) || loan.statementPaid2026 || loan.principalPaidSoFar)}
+                      {fmtMoney(displayPaid)}
                     </div>
                     <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>
-                      {effectiveElapsed > 0 ? `${effectiveElapsed} EMIs completed` : loan.principalPaidSoFar > 0 ? `${loan.principalPercentPaid}% repaid` : '0 EMIs elapsed'}
+                      {effectiveElapsed} EMIs completed
                     </div>
                   </div>
                   <div>
                     <div style={{ fontSize: 11, color: t.muted }}>To Be Paid</div>
                     <div style={{ fontSize: 14, fontWeight: 600, color: colorToBePaid, marginTop: 2 }}>
-                      {fmtMoney(
-                        effectiveRemaining > 0 && (loan.amountToBePaid === loan.tenureMonths * loan.emi || loan.amountToBePaid === 0)
-                          ? effectiveRemaining * loan.emi
-                          : loan.amountToBePaid,
-                      )}
+                      {fmtMoney(displayToBePaid)}
                     </div>
                     <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>
                       {effectiveRemaining} EMIs left

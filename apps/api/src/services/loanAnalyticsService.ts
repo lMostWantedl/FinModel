@@ -1,4 +1,4 @@
-import { presentValue, toMoney } from '@debt/engine';
+import { monthsBetween, presentValue, toMoney } from '@debt/engine';
 import { prisma } from '../lib/prisma.js';
 import { rowToDomain } from './loanMapper.js';
 import { reconcileLoanEmis } from './ledgerService.js';
@@ -106,22 +106,37 @@ export async function getLoansAnalytics(): Promise<LoanAnalyticsResponse> {
       const ledgerInfo = ledgerByLoan.get(row.id) ?? { total: 0, count: 0, lastDate: null };
       const verifiedDebits = ledgerInfo.count;
 
-      // Dynamic schedule sync:
-      // If statement debits have been verified, the elapsed EMIs is at least the verified debit count.
-      // (For loans dated before 2026, retain their prior elapsed months if higher).
-      const storedElapsed = Math.max(0, tenure - domain.remainingMonths);
-      const elapsed = Math.max(storedElapsed, verifiedDebits);
+      // Determine true elapsed and remaining EMIs:
+      // Primary ground truth: loan contract schedule from database
+      const rawRemaining = domain.remainingMonths ?? row.remainingMonths ?? 0;
+      let elapsedFromLoan = Math.max(0, tenure - rawRemaining);
+
+      // Inversion safeguard: if the stored remainingMonths accidentally equaled the verified paid count
+      // (and was smaller than the elapsed tenure), untangle them:
+      if (
+        verifiedDebits > 0 &&
+        rawRemaining === verifiedDebits &&
+        rawRemaining < tenure - rawRemaining
+      ) {
+        elapsedFromLoan = verifiedDebits;
+      }
+
+      // Check if statement verifications show more elapsed payments than recorded in loan data:
+      const statementBoundary = new Date('2026-01-01');
+      const priorMonthsBefore2026 =
+        row.startDate && row.startDate < statementBoundary
+          ? monthsBetween(row.startDate, statementBoundary)
+          : 0;
+      const statementElapsed = priorMonthsBefore2026 + verifiedDebits;
+
+      const elapsed = Math.min(tenure, Math.max(elapsedFromLoan, statementElapsed));
       const remaining = Math.max(0, tenure - elapsed);
 
-      // Current outstanding balance:
-      // If payments have been verified, compute the amortized remaining principal balance.
-      let outstanding = toMoney(domain.outstandingAmount);
-      if (verifiedDebits > 0 && remaining < domain.remainingMonths) {
-        outstanding =
-          remaining > 0
-            ? Math.round(Number(presentValue(domain.annualInterestRate, emi, remaining)) * 100) / 100
-            : 0;
-      }
+      // Current outstanding balance: amortized remaining principal balance
+      const outstanding =
+        remaining > 0
+          ? Math.round(Number(presentValue(domain.annualInterestRate, emi, remaining)) * 100) / 100
+          : 0;
 
       const principalPaidSoFar = Math.max(0, Math.round((loanAmount - outstanding) * 100) / 100);
       const principalPercentPaid = loanAmount > 0 ? Math.round((principalPaidSoFar / loanAmount) * 1000) / 10 : 0;
@@ -130,7 +145,7 @@ export async function getLoansAnalytics(): Promise<LoanAnalyticsResponse> {
       const amountToBePaid = Math.round(remaining * emi * 100) / 100;
 
       // Contractual amount repaid since loan inception:
-      const contractualPaid = elapsed > 0 ? Math.round(elapsed * emi * 100) / 100 : 0;
+      const contractualPaid = Math.round(elapsed * emi * 100) / 100;
       const amountPaid = contractualPaid;
 
       // Progress % based on loan contract tenure
@@ -251,17 +266,32 @@ export async function recalculateLoans(): Promise<LoanAnalyticsResponse> {
     const domain = await rowToDomain(row);
     const tenure = domain.tenureMonths;
     const emi = toMoney(domain.emi);
-    const storedElapsed = Math.max(0, tenure - domain.remainingMonths);
-    const elapsed = Math.max(storedElapsed, verifiedDebits);
+
+    const rawRemaining = domain.remainingMonths ?? row.remainingMonths ?? 0;
+    let elapsedFromLoan = Math.max(0, tenure - rawRemaining);
+
+    if (
+      verifiedDebits > 0 &&
+      rawRemaining === verifiedDebits &&
+      rawRemaining < tenure - rawRemaining
+    ) {
+      elapsedFromLoan = verifiedDebits;
+    }
+
+    const statementBoundary = new Date('2026-01-01');
+    const priorMonthsBefore2026 =
+      row.startDate && row.startDate < statementBoundary
+        ? monthsBetween(row.startDate, statementBoundary)
+        : 0;
+
+    const statementElapsed = priorMonthsBefore2026 + verifiedDebits;
+    const elapsed = Math.min(tenure, Math.max(elapsedFromLoan, statementElapsed));
     const remaining = Math.max(0, tenure - elapsed);
 
-    let outstanding = toMoney(domain.outstandingAmount);
-    if (remaining < domain.remainingMonths) {
-      outstanding =
-        remaining > 0
-          ? Math.round(Number(presentValue(domain.annualInterestRate, emi, remaining)) * 100) / 100
-          : 0;
-    }
+    const outstanding =
+      remaining > 0
+        ? Math.round(Number(presentValue(domain.annualInterestRate, emi, remaining)) * 100) / 100
+        : 0;
 
     await prisma.loan.update({
       where: { id: row.id },
